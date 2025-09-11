@@ -1,9 +1,14 @@
 import json
+import logging
 import os
+import re
 import time
 
 from selenium import webdriver
-from selenium.common.exceptions import WebDriverException
+from selenium.common.exceptions import (
+    StaleElementReferenceException,
+    WebDriverException,
+)
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
@@ -13,6 +18,7 @@ from quora_selectors import (
     ANSWER_LINK_XPATHS,
     ANSWER_TEXT_XPATHS,
     INITIAL_ANSWER_WAIT_SECONDS,
+    PROFILE_STATS_XPATHS,
     QUESTION_TEXT_XPATHS,
 )
 
@@ -21,37 +27,40 @@ class QuoraScraper:
     def __init__(self):
         # Initialize Chrome WebDriver with error handling & optional fallback
         self.driver = None
+        # Logging setup
+        log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+        logging.basicConfig(
+            level=getattr(logging, log_level, logging.INFO),
+            format="%(asctime)s [%(levelname)s] %(message)s",
+        )
+        self.logger = logging.getLogger("QuoraScraper")
         options = webdriver.ChromeOptions()
         # Modern headless for recent Chrome versions
         options.add_argument("--headless=new")
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        # Allow user to specify a custom Chrome binary (e.g., Chromium) via env
         chrome_binary = os.environ.get("CHROME_BINARY")
         if chrome_binary:
             options.binary_location = chrome_binary
-    self.debug = os.environ.get("DEBUG_SELECTORS") == "1"
-    self.seen_links = set()
-
+        self.debug = os.environ.get("DEBUG_SELECTORS") == "1"
+        self.seen_links = set()
         try:
             self.driver = webdriver.Chrome(options=options)
             self.driver.set_page_load_timeout(30)
         except WebDriverException as e:
-            print("[FATAL] Failed to start Chrome WebDriver.")
-            print(f"Reason: {e}\n")
+            self.logger.error("Failed to start Chrome WebDriver: %s", e)
             print("Troubleshooting suggestions:")
             print(" 1. Open Google Chrome manually once (clears Gatekeeper warning).")
             print(
                 " 2. If macOS blocked it: xattr -dr com.apple.quarantine /Applications/Google\\ Chrome.app"
             )
             print(
-                " 3. Ensure Chrome is installed in /Applications and matches system architecture (ARM vs Intel)."
+                " 3. Ensure Chrome is installed in /Applications and matches architecture."
             )
             print(" 4. Update Selenium: pip install -U selenium")
-            print(" 5. (Optional) Set CHROME_BINARY to an alternate Chromium path.")
-            print(" 6. (Fallback) Set USE_FIREFOX=1 to try Firefox/geckodriver.")
-
+            print(" 5. Optionally set CHROME_BINARY to alternate Chromium.")
+            print(" 6. Set USE_FIREFOX=1 for Firefox fallback.")
             if os.environ.get("USE_FIREFOX") == "1":
                 try:
                     from selenium.webdriver.firefox.options import (
@@ -62,23 +71,25 @@ class QuoraScraper:
                     fopts.add_argument("-headless")
                     self.driver = webdriver.Firefox(options=fopts)
                     self.driver.set_page_load_timeout(30)
-                    print("[INFO] Fallback to Firefox succeeded.")
+                    self.logger.info("Fallback to Firefox succeeded.")
                 except Exception as fe:
-                    print(f"[FATAL] Firefox fallback also failed: {fe}")
+                    self.logger.error("Firefox fallback failed: %s", fe)
             if not self.driver:
-                # Re-raise to let caller handle termination
                 raise
         # Instance state
         self.results = []  # Store results as we go
         self.processed = 0
+        self.profile_stats = {}
         # Limits
         self.max_results = int(os.environ.get("MAX_RESULTS", "500"))
         self.max_scrolls = int(os.environ.get("MAX_SCROLLS", "150"))
-        self.no_growth_threshold = (
-            5  # stop if this many consecutive scrolls yield no new content
-        )
+        self.no_growth_threshold = 5
+        self.scroll_pause = float(os.environ.get("SCROLL_PAUSE", "1.5"))
         self.output_dir = "qa_files"
         os.makedirs(self.output_dir, exist_ok=True)
+        self.incremental = os.environ.get("INCREMENTAL_SAVE") == "1"
+        self.aggregate_filename = os.environ.get("QA_OUTPUT_FILE", "qa_all.json")
+        self.answer_limit = None  # dynamic limit based on profile answers count
 
     def print_status(self, message):
         """Print status message with carriage return"""
@@ -90,24 +101,22 @@ class QuoraScraper:
         scroll_count = 0
         last_content_count = 0
         stagnant_scrolls = 0
-
-        print("\nScrolling through profile...")
-
-        while scroll_count < self.max_scrolls and self.processed < self.max_results:
+        self.logger.info("Starting scroll...")
+        while scroll_count < self.max_scrolls and self.processed < (
+            self.answer_limit or self.max_results
+        ):
             scroll_count += 1
             self.print_status(
-                f"Scroll {scroll_count}/{self.max_scrolls} - Found {last_content_count} items - Saved {self.processed}/{self.max_results}"
+                f"Scroll {scroll_count}/{self.max_scrolls} - Items {last_content_count} - Saved {self.processed}/{self.max_results}"
             )
-
-            # Scroll down
             self.driver.execute_script(
                 "window.scrollTo(0, document.body.scrollHeight);"
             )
-            time.sleep(1.5)
-
-            # Count current items (rough proxy; still uses q-box presence)
-            current_content = len(self.driver.find_elements(By.CLASS_NAME, "q-box"))
-
+            time.sleep(self.scroll_pause)
+            # Use answer links count instead of q-box
+            current_content = len(
+                self.driver.find_elements(By.XPATH, "//a[contains(@href,'/answer/')]")
+            )
             if current_content > last_content_count:
                 last_content_count = current_content
                 stagnant_scrolls = 0
@@ -120,32 +129,96 @@ class QuoraScraper:
                     new_height == last_height
                     or stagnant_scrolls >= self.no_growth_threshold
                 ):
-                    print(
-                        f"\nStopping scroll: height plateau or no growth ({stagnant_scrolls} stagnant). Items: {current_content}"
+                    self.logger.info(
+                        "Stopping scroll: plateau or no growth (%s stagnant)",
+                        stagnant_scrolls,
                     )
                     break
                 last_height = new_height
-
         if scroll_count >= self.max_scrolls:
-            print(f"\nReached max scrolls ({self.max_scrolls}).")
-        if self.processed >= self.max_results:
-            print(f"\nReached max results limit ({self.max_results}) during scrolling.")
+            self.logger.info("Reached max scrolls (%s)", self.max_scrolls)
+        if self.processed >= (self.answer_limit or self.max_results):
+            self.logger.info(
+                "Reached answer limit (%s) during scroll",
+                self.answer_limit or self.max_results,
+            )
+
+    def _normalize_number(self, txt):
+        if not txt:
+            return None
+        txt = txt.replace("\u00a0", " ").replace(",", "").strip()
+        # Handle formats like '14,7 mil' or '14.7 mil'
+        mil_match = re.match(r"([0-9]+)[\.,]?([0-9]+)?\s*mil", txt, re.IGNORECASE)
+        if mil_match:
+            whole = int(mil_match.group(1))
+            frac = mil_match.group(2)
+            value = whole * 1000 + (
+                int(frac) * (1000 // (10 ** len(frac))) if frac else 0
+            )
+            return value
+        # Plain integer
+        digits = re.findall(r"\d+", txt)
+        if digits:
+            try:
+                return int("".join(digits))
+            except Exception:
+                return None
+        return None
+
+    def _extract_profile_stats(self):
+        stats = {}
+        for key, xp in PROFILE_STATS_XPATHS.items():
+            if key not in ("answers", "questions", "following", "followers"):
+                continue
+            try:
+                elem = self.driver.find_element(By.XPATH, xp)
+                raw = elem.text.strip()
+                stats[key] = self._normalize_number(raw)
+            except Exception:
+                stats[key] = None
+        # Meta fallback
+        if stats.get("answers") is None or stats.get("questions") is None:
+            try:
+                meta_desc = self.driver.find_element(
+                    By.XPATH, "//meta[@property='og:description']"
+                )
+                content = meta_desc.get_attribute("content") or ""
+                answers_match = re.search(
+                    r"(\d+[\.,]?\d*(?:\s*mil)?)\s+respostas", content, re.IGNORECASE
+                )
+                questions_match = re.search(
+                    r"(\d+[\.,]?\d*(?:\s*mil)?)\s+perguntas", content, re.IGNORECASE
+                )
+                if stats.get("answers") is None and answers_match:
+                    stats["answers"] = self._normalize_number(answers_match.group(1))
+                if stats.get("questions") is None and questions_match:
+                    stats["questions"] = self._normalize_number(
+                        questions_match.group(1)
+                    )
+            except Exception:
+                pass
+        # Drop followers/following from final stats per request
+        for drop_key in ("followers", "following"):
+            if drop_key in stats:
+                stats.pop(drop_key)
+        self.profile_stats = stats
+        # Set dynamic answer limit (min of answers count and max_results)
+        answers_total = stats.get("answers")
+        if answers_total and isinstance(answers_total, int):
+            self.answer_limit = min(answers_total, self.max_results)
+        else:
+            self.answer_limit = self.max_results
+        return stats
 
     def extract_content(self, url):
-    """Extract all questions and answers from a Quora profile"""
-    print(f"\nLoading profile: {url}")
-    self.driver.get(url)
-
-    try:
-            # First try to find any content on the page
+        """Extract all questions and answers from a Quora profile"""
+        self.logger.info("Loading profile: %s", url)
+        self.driver.get(url)
+        try:
             WebDriverWait(self.driver, 15).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
-
-            # Give the page some time to load dynamic content
-            time.sleep(5)
-
-            # Wait for at least one answer block using any of the block XPaths
+            time.sleep(2)
             found_block = False
             for xpath in ANSWER_BLOCK_XPATHS:
                 try:
@@ -157,14 +230,15 @@ class QuoraScraper:
                 except Exception:
                     continue
             if not found_block:
-                print(
-                    "Warning: No answer blocks detected with current XPaths before scrolling."
-                )
-
-            # Scroll to load more answers
+                self.logger.warning("No answer blocks detected before scrolling.")
+            # Extract stats early to establish answer_limit
+            try:
+                self._extract_profile_stats()
+                self.logger.info("Answer limit set to %s", self.answer_limit)
+            except Exception as e:
+                self.logger.warning("Initial stats extraction failed: %s", e)
+                self.answer_limit = self.max_results
             self.scroll_to_bottom()
-
-            # Collect initial blocks
             blocks = []
             seen_ids = set()
             for xpath in ANSWER_BLOCK_XPATHS:
@@ -176,15 +250,15 @@ class QuoraScraper:
                             seen_ids.add(e.id)
                 except Exception:
                     continue
-
             if self.debug:
-                print(f"[DEBUG] Initial block candidates: {len(blocks)}")
-
-            # Fallback enrichment via direct answer links
-            answer_link_elems = self.driver.find_elements(By.XPATH, "//a[contains(@href,'/answer/')]")
+                self.logger.debug("Initial block candidates: %d", len(blocks))
+            answer_link_elems = self.driver.find_elements(
+                By.XPATH, "//a[contains(@href,'/answer/')]"
+            )
             if self.debug:
-                print(f"[DEBUG] Found {len(answer_link_elems)} raw answer link elements")
-
+                self.logger.debug(
+                    "Found %d raw answer link elements", len(answer_link_elems)
+                )
             enriched_blocks = []
             for link in answer_link_elems:
                 try:
@@ -211,24 +285,21 @@ class QuoraScraper:
                         seen_ids.add(container.id)
                 except Exception:
                     continue
-
             if len(enriched_blocks) > len(blocks):
                 if self.debug:
-                    print(
-                        f"[DEBUG] Replacing blocks with enriched set: {len(enriched_blocks)} vs {len(blocks)}"
+                    self.logger.debug(
+                        "Replacing blocks with enriched set: %d vs %d",
+                        len(enriched_blocks),
+                        len(blocks),
                     )
                 blocks = enriched_blocks
-
-            print(
-                f"Discovered {len(blocks)} potential answer blocks (post-enrichment)"
-            )
-
+            self.logger.info("Discovered %d potential answer blocks", len(blocks))
             # Process blocks
             for block in blocks:
                 try:
-                    if self.processed >= self.max_results:
-                        print(
-                            f"Reached max results limit ({self.max_results}); stopping block processing."
+                    if self.processed >= (self.answer_limit or self.max_results):
+                        self.logger.info(
+                            "Reached answer limit; stopping block processing."
                         )
                         break
                     # Extract question text via fallbacks
@@ -278,7 +349,7 @@ class QuoraScraper:
                     # Derive question text from slug if missing
                     if not question_text and answer_link:
                         try:
-                            from urllib.parse import urlparse, unquote
+                            from urllib.parse import unquote, urlparse
 
                             path = urlparse(answer_link).path
                             parts = path.split("/answer/")[0].strip("/").split("/")
@@ -296,19 +367,14 @@ class QuoraScraper:
                         if self.debug:
                             try:
                                 snippet = block.get_attribute("innerHTML")[:300]
-                                print(
-                                    f"[DEBUG] Skipping block missing data. Snippet: {snippet}"
+                                self.logger.debug(
+                                    "Skipping block missing data. Snippet: %s", snippet
                                 )
                             except Exception:
                                 pass
                         continue
 
                     self.seen_links.add(answer_link)
-
-                    print(f"\nQ [{self.processed + 1}]: {question_text[:100]}")
-                    print(f"A [{self.processed + 1}]: {answer_text[:100]}")
-                    print("-" * 80)
-
                     self.results.append(
                         {
                             "question_text": question_text,
@@ -317,38 +383,59 @@ class QuoraScraper:
                         }
                     )
                     self.processed += 1
+                    if self.incremental:
+                        self._save_single(self.processed, self.results[-1])
                 except KeyboardInterrupt:
                     raise
                 except Exception as e:
-                    print(f"\nError processing block: {e}")
+                    self.logger.error("Error processing block: %s", e)
                     continue
-
         except KeyboardInterrupt:
-            print("\nInterrupted! Saving collected data...")
+            self.logger.warning("Interrupted! Saving collected data...")
+        results = self.results  # keep original reference
+        # After processing blocks extract stats
+        try:
+            self._extract_profile_stats()
+        except Exception as e:
+            self.logger.warning("Failed to extract profile stats: %s", e)
+        return results
 
-        return self.results
+    def _retry(self, func, attempts=2):
+        for i in range(attempts):
+            try:
+                return func()
+            except StaleElementReferenceException:
+                if i == attempts - 1:
+                    raise
+                time.sleep(0.2)
 
     def save_to_json(self, results, filename):
-        """Save results to individual JSON files"""
-        print(f"\nSaving {len(results)} QA pairs...")
-
-        # Save each QA pair to a separate file
-        for idx, item in enumerate(results, 1):
-            qa_file = os.path.join(self.output_dir, f"qa_{idx:04d}.json")
-            with open(qa_file, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "question": item["question_text"],
-                        "answer": item["answer_text"],
-                        "url": item["answer_link"],
-                    },
-                    f,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            print(f"Saved QA pair {idx}")
-
-        print(f"All files saved to {self.output_dir}/")
+        # Aggregate all results into one file
+        out_path = os.path.join(self.output_dir, self.aggregate_filename)
+        data = {
+            "profile_stats": self.profile_stats,
+            "answer_limit": self.answer_limit or self.max_results,
+            "collected": len(results),
+            "items": [
+                {
+                    "question": item["question_text"],
+                    "answer": item["answer_text"],
+                    "url": item["answer_link"],
+                }
+                for item in results
+            ],
+        }
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self.logger.info(
+                "Saved %d QA pairs to %s (limit %s)",
+                len(results),
+                out_path,
+                data["answer_limit"],
+            )
+        except Exception as e:
+            self.logger.error("Failed saving aggregated file: %s", e)
 
     def close(self):
         """Close the browser"""
@@ -366,28 +453,24 @@ def main():
     except WebDriverException:
         print("Exiting due to WebDriver initialization failure.")
         return
-
     try:
         # URL of the Quora profile with proper encoding
         profile_url = (
             "https://pt.quora.com/profile/Jo%C3%A3o-Eurico-de-Aguiar-Lima/answers"
         )
-
         print("\nPress Ctrl+C at any time to stop and save current progress\n")
         # Extract content
         print("Starting extraction...")
         results = scraper.extract_content(profile_url)
-
-        # Save results
-        scraper.save_to_json(results, "")  # Filename not needed anymore
+        scraper.save_to_json(results, "")
         print(f"\nExtracted and saved {len(results)} QA pairs")
-
+        if scraper.profile_stats:
+            print("Profile stats:", scraper.profile_stats)
     except KeyboardInterrupt:
         print("\nFinal cleanup...")
-        if scraper.results:  # Save any results we have
+        if scraper.results:
             scraper.save_to_json(scraper.results, "")
     finally:
-        # Clean up
         scraper.close()
 
 
