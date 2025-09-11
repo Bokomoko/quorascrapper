@@ -1,0 +1,14 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+qa_files/
+aula01.md
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+# Ignore saved Quora asset folder
+João Eurico de Aguiar Lima - Quora_files/
