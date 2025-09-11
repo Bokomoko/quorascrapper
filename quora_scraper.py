@@ -16,10 +16,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from quora_selectors import (
     ANSWER_BLOCK_XPATHS,
     ANSWER_LINK_XPATHS,
-    ANSWER_TEXT_XPATHS,
     INITIAL_ANSWER_WAIT_SECONDS,
     PROFILE_STATS_XPATHS,
-    QUESTION_TEXT_XPATHS,
 )
 
 
@@ -81,8 +79,7 @@ class QuoraScraper:
         self.processed = 0
         self.profile_stats = {}
         # Limits
-        self.max_results = int(os.environ.get("MAX_RESULTS", "500"))
-        self.max_scrolls = int(os.environ.get("MAX_SCROLLS", "150"))
+        self.max_results = int(os.environ.get("MAX_RESULTS", "16000"))
         self.no_growth_threshold = 5
         self.scroll_pause = float(os.environ.get("SCROLL_PAUSE", "1.5"))
         self.output_dir = "qa_files"
@@ -101,19 +98,17 @@ class QuoraScraper:
         scroll_count = 0
         last_content_count = 0
         stagnant_scrolls = 0
-        self.logger.info("Starting scroll...")
-        while scroll_count < self.max_scrolls and self.processed < (
-            self.answer_limit or self.max_results
-        ):
+        self.logger.info("Starting scroll (no max scroll limit)...")
+        # Infinite scroll until stagnation or item limit
+        while self.processed < (self.answer_limit or self.max_results):
             scroll_count += 1
             self.print_status(
-                f"Scroll {scroll_count}/{self.max_scrolls} - Items {last_content_count} - Saved {self.processed}/{self.max_results}"
+                f"Scroll {scroll_count} - Items {last_content_count} - Collected {self.processed}/{self.answer_limit or self.max_results}"
             )
             self.driver.execute_script(
                 "window.scrollTo(0, document.body.scrollHeight);"
             )
             time.sleep(self.scroll_pause)
-            # Use answer links count instead of q-box
             current_content = len(
                 self.driver.find_elements(By.XPATH, "//a[contains(@href,'/answer/')]")
             )
@@ -135,8 +130,6 @@ class QuoraScraper:
                     )
                     break
                 last_height = new_height
-        if scroll_count >= self.max_scrolls:
-            self.logger.info("Reached max scrolls (%s)", self.max_scrolls)
         if self.processed >= (self.answer_limit or self.max_results):
             self.logger.info(
                 "Reached answer limit (%s) during scroll",
@@ -211,7 +204,7 @@ class QuoraScraper:
         return stats
 
     def extract_content(self, url):
-        """Extract all questions and answers from a Quora profile"""
+        """Extract all answer URLs from a Quora profile"""
         self.logger.info("Loading profile: %s", url)
         self.driver.get(url)
         try:
@@ -219,6 +212,14 @@ class QuoraScraper:
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
             time.sleep(2)
+            # Extract stats BEFORE any scrolling or block discovery
+            try:
+                self._extract_profile_stats()
+                print(f"Profile stats (pre-scroll): {self.profile_stats}")
+                self.logger.info("Answer limit set to %s", self.answer_limit)
+            except Exception as e:
+                self.logger.warning("Initial stats extraction failed: %s", e)
+                self.answer_limit = self.max_results
             found_block = False
             for xpath in ANSWER_BLOCK_XPATHS:
                 try:
@@ -231,13 +232,6 @@ class QuoraScraper:
                     continue
             if not found_block:
                 self.logger.warning("No answer blocks detected before scrolling.")
-            # Extract stats early to establish answer_limit
-            try:
-                self._extract_profile_stats()
-                self.logger.info("Answer limit set to %s", self.answer_limit)
-            except Exception as e:
-                self.logger.warning("Initial stats extraction failed: %s", e)
-                self.answer_limit = self.max_results
             self.scroll_to_bottom()
             blocks = []
             seen_ids = set()
@@ -302,31 +296,7 @@ class QuoraScraper:
                             "Reached answer limit; stopping block processing."
                         )
                         break
-                    # Extract question text via fallbacks
-                    question_text = None
-                    for qx in QUESTION_TEXT_XPATHS:
-                        try:
-                            q_elem = block.find_element(By.XPATH, qx)
-                            text = q_elem.text.strip()
-                            if text:
-                                question_text = text
-                                break
-                        except Exception:
-                            continue
-
-                    # Extract answer text (concatenate if multiple elements)
-                    answer_text = None
-                    for ax in ANSWER_TEXT_XPATHS:
-                        try:
-                            a_elems = block.find_elements(By.XPATH, ax)
-                            texts = [a.text.strip() for a in a_elems if a.text.strip()]
-                            if texts:
-                                answer_text = "\n".join(texts)
-                                break
-                        except Exception:
-                            continue
-
-                    # Extract answer link (with global fallback)
+                    # Only extract answer link now
                     answer_link = None
                     for lx in ANSWER_LINK_XPATHS:
                         try:
@@ -345,46 +315,11 @@ class QuoraScraper:
                             answer_link = l_elem.get_attribute("href")
                         except Exception:
                             pass
-
-                    # Derive question text from slug if missing
-                    if not question_text and answer_link:
-                        try:
-                            from urllib.parse import unquote, urlparse
-
-                            path = urlparse(answer_link).path
-                            parts = path.split("/answer/")[0].strip("/").split("/")
-                            if parts:
-                                slug = parts[-1]
-                                guess = unquote(slug).replace("-", " ")
-                                if guess:
-                                    question_text = guess
-                        except Exception:
-                            pass
-
                     if not answer_link or answer_link in self.seen_links:
                         continue
-                    if not (question_text and answer_text):
-                        if self.debug:
-                            try:
-                                snippet = block.get_attribute("innerHTML")[:300]
-                                self.logger.debug(
-                                    "Skipping block missing data. Snippet: %s", snippet
-                                )
-                            except Exception:
-                                pass
-                        continue
-
                     self.seen_links.add(answer_link)
-                    self.results.append(
-                        {
-                            "question_text": question_text,
-                            "answer_text": answer_text,
-                            "answer_link": answer_link,
-                        }
-                    )
+                    self.results.append(answer_link)
                     self.processed += 1
-                    if self.incremental:
-                        self._save_single(self.processed, self.results[-1])
                 except KeyboardInterrupt:
                     raise
                 except Exception as e:
@@ -395,9 +330,10 @@ class QuoraScraper:
         results = self.results  # keep original reference
         # After processing blocks extract stats
         try:
+            # Re-extract at end to refresh (optional)
             self._extract_profile_stats()
         except Exception as e:
-            self.logger.warning("Failed to extract profile stats: %s", e)
+            self.logger.warning("Failed to refresh profile stats: %s", e)
         return results
 
     def _retry(self, func, attempts=2):
@@ -410,32 +346,42 @@ class QuoraScraper:
                 time.sleep(0.2)
 
     def save_to_json(self, results, filename):
-        # Aggregate all results into one file
         out_path = os.path.join(self.output_dir, self.aggregate_filename)
+        tmp_path = out_path + ".tmp"
         data = {
             "profile_stats": self.profile_stats,
             "answer_limit": self.answer_limit or self.max_results,
             "collected": len(results),
-            "items": [
-                {
-                    "question": item["question_text"],
-                    "answer": item["answer_text"],
-                    "url": item["answer_link"],
-                }
-                for item in results
-            ],
+            "urls": results,
         }
         try:
-            with open(out_path, "w", encoding="utf-8") as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, out_path)
+            size = os.path.getsize(out_path)
+            with open(out_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            count = len(loaded.get("urls", []))
+            if count != len(results):
+                self.logger.warning(
+                    "URL count mismatch after save: expected %d got %d",
+                    len(results),
+                    count,
+                )
             self.logger.info(
-                "Saved %d QA pairs to %s (limit %s)",
+                "Saved %d URLs to %s (size %d bytes, limit %s)",
                 len(results),
                 out_path,
+                size,
                 data["answer_limit"],
             )
         except Exception as e:
             self.logger.error("Failed saving aggregated file: %s", e)
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
 
     def close(self):
         """Close the browser"""
