@@ -13,6 +13,17 @@ ANSWER_BLOCK_XPATHS = [
     "//article[.//a[contains(@href,'/answer/')]]",
 ]
 
+# Unified answer anchor selector — matches multiple URL shapes Quora might use
+ANSWER_ANCHOR_XPATH = " | ".join(
+    [
+        "//a[contains(@href,'/answer/')]",
+        # Some pages may use tracking params or uppercase; be lenient
+        "//a[contains(translate(@href,'ANSWER','answer'),'/answer/')]",
+        # Fallback: answer anchors with data attrs
+        "//a[@data-ntiid and contains(@href,'/answer/')]",
+    ]
+)
+
 # Refined question text selectors inside a block. Order matters.
 QUESTION_TEXT_XPATHS = [
     # Anchor to the question page (preferred)

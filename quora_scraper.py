@@ -1,9 +1,11 @@
-import json
 import logging
 import os
 import re
+import sys
 import time
+from urllib.parse import urljoin
 
+from confluent_kafka import Producer
 from selenium import webdriver
 from selenium.common.exceptions import (
     StaleElementReferenceException,
@@ -14,6 +16,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from quora_selectors import (
+    ANSWER_ANCHOR_XPATH,
     ANSWER_BLOCK_XPATHS,
     ANSWER_LINK_XPATHS,
     INITIAL_ANSWER_WAIT_SECONDS,
@@ -82,11 +85,12 @@ class QuoraScraper:
         self.max_results = int(os.environ.get("MAX_RESULTS", "16000"))
         self.no_growth_threshold = 5
         self.scroll_pause = float(os.environ.get("SCROLL_PAUSE", "1.5"))
-        self.output_dir = "qa_files"
-        os.makedirs(self.output_dir, exist_ok=True)
-        self.incremental = os.environ.get("INCREMENTAL_SAVE") == "1"
-        self.aggregate_filename = os.environ.get("QA_OUTPUT_FILE", "qa_all.json")
-        self.answer_limit = None  # dynamic limit based on profile answers count
+        # Kafka settings
+        self.kafka_bootstrap = os.environ.get("KAFKA_BOOTSTRAP", "192.168.1.116:9092")
+        self.kafka_topic = os.environ.get("KAFKA_TOPIC", "quora-answers")
+        self.kafka_producer = Producer({"bootstrap.servers": self.kafka_bootstrap})
+
+    # File output logic was removed; Kafka streaming only
 
     def print_status(self, message):
         """Print status message with carriage return"""
@@ -110,7 +114,7 @@ class QuoraScraper:
             )
             time.sleep(self.scroll_pause)
             current_content = len(
-                self.driver.find_elements(By.XPATH, "//a[contains(@href,'/answer/')]")
+                self.driver.find_elements(By.XPATH, ANSWER_ANCHOR_XPATH)
             )
             if current_content > last_content_count:
                 last_content_count = current_content
@@ -204,7 +208,7 @@ class QuoraScraper:
         return stats
 
     def extract_content(self, url):
-        """Extract all answer URLs from a Quora profile"""
+        """Extract all answer URLs from a Quora profile and send to Kafka"""
         self.logger.info("Loading profile: %s", url)
         self.driver.get(url)
         try:
@@ -212,7 +216,7 @@ class QuoraScraper:
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
             time.sleep(2)
-            # Extract stats BEFORE any scrolling or block discovery
+            # Stats first
             try:
                 self._extract_profile_stats()
                 print(f"Profile stats (pre-scroll): {self.profile_stats}")
@@ -220,121 +224,157 @@ class QuoraScraper:
             except Exception as e:
                 self.logger.warning("Initial stats extraction failed: %s", e)
                 self.answer_limit = self.max_results
-            found_block = False
-            for xpath in ANSWER_BLOCK_XPATHS:
-                try:
-                    WebDriverWait(self.driver, INITIAL_ANSWER_WAIT_SECONDS).until(
-                        EC.presence_of_element_located((By.XPATH, xpath))
-                    )
-                    found_block = True
-                    break
-                except Exception:
-                    continue
-            if not found_block:
-                self.logger.warning("No answer blocks detected before scrolling.")
+            # Scroll
             self.scroll_to_bottom()
-            blocks = []
-            seen_ids = set()
-            for xpath in ANSWER_BLOCK_XPATHS:
+            # Fast pass: grab all anchors that look like answer links
+            anchors = self.driver.find_elements(By.XPATH, ANSWER_ANCHOR_XPATH)
+            self.logger.info("Fast scan found %d answer anchors", len(anchors))
+            for a in anchors:
+                if self.processed >= (self.answer_limit or self.max_results):
+                    break
                 try:
-                    elems = self.driver.find_elements(By.XPATH, xpath)
-                    for e in elems:
-                        if e.id not in seen_ids:
-                            blocks.append(e)
-                            seen_ids.add(e.id)
-                except Exception:
-                    continue
-            if self.debug:
-                self.logger.debug("Initial block candidates: %d", len(blocks))
-            answer_link_elems = self.driver.find_elements(
-                By.XPATH, "//a[contains(@href,'/answer/')]"
-            )
-            if self.debug:
-                self.logger.debug(
-                    "Found %d raw answer link elements", len(answer_link_elems)
-                )
-            enriched_blocks = []
-            for link in answer_link_elems:
-                try:
-                    href = link.get_attribute("href") or ""
-                    if not href or href in self.seen_links:
+                    href = a.get_attribute("href")
+                    if not href:
                         continue
-                    ancestor = link
-                    container = None
-                    for _ in range(6):
-                        ancestor = ancestor.find_element(By.XPATH, "..")
-                        tag = ancestor.tag_name.lower()
-                        if tag in ("article", "div"):
-                            try:
-                                ancestor.find_element(
-                                    By.XPATH,
-                                    ".//*[contains(@class,'q-text') or contains(@href,'/question/')]",
-                                )
-                                container = ancestor
-                                break
-                            except Exception:
-                                continue
-                    if container and container.id not in seen_ids:
-                        enriched_blocks.append(container)
-                        seen_ids.add(container.id)
-                except Exception:
+                    # Normalize to absolute URL (handles potential relative)
+                    href = urljoin(url, href)
+                    if "/answer/" not in href:
+                        continue
+                    if href in self.seen_links:
+                        continue
+                    self.seen_links.add(href)
+                    self._send_to_kafka(href)
+                    self.processed += 1
+                except Exception as ex:
+                    self.logger.debug(f"Anchor processing error: {ex}")
                     continue
-            if len(enriched_blocks) > len(blocks):
+            if self.processed < (self.answer_limit or self.max_results):
+                # Fallback to block-based parsing if needed
+                found_block = False
+                print("[DEBUG] Trying ANSWER_BLOCK_XPATHS:", ANSWER_BLOCK_XPATHS)
+                for xpath in ANSWER_BLOCK_XPATHS:
+                    try:
+                        WebDriverWait(self.driver, INITIAL_ANSWER_WAIT_SECONDS).until(
+                            EC.presence_of_element_located((By.XPATH, xpath))
+                        )
+                        found_block = True
+                        break
+                    except Exception:
+                        continue
+                if not found_block:
+                    self.logger.warning("No answer blocks detected before scrolling.")
+                self.scroll_to_bottom()
+                blocks = []
+                seen_ids = set()
+                for xpath in ANSWER_BLOCK_XPATHS:
+                    try:
+                        elems = self.driver.find_elements(By.XPATH, xpath)
+                        print(f"[DEBUG] XPath {xpath} found {len(elems)} elements")
+                        for e in elems:
+                            if e.id not in seen_ids:
+                                blocks.append(e)
+                                seen_ids.add(e.id)
+                    except Exception as ex:
+                        print(f"[DEBUG] Error with XPath {xpath}: {ex}")
+                        continue
+                print(f"[DEBUG] Total blocks found: {len(blocks)}")
+                # Dump outerHTML of first 3 blocks for inspection
+                for i, block in enumerate(blocks[:3]):
+                    try:
+                        html = block.get_attribute("outerHTML")
+                        print(
+                            f"[DEBUG] Block {i} outerHTML (first 500 chars):\n{html[:500]}\n---"
+                        )
+                    except Exception as ex:
+                        print(f"[DEBUG] Could not get outerHTML for block {i}: {ex}")
+                answer_link_elems = self.driver.find_elements(
+                    By.XPATH, "//a[contains(@href,'/answer/')]"
+                )
                 if self.debug:
                     self.logger.debug(
-                        "Replacing blocks with enriched set: %d vs %d",
-                        len(enriched_blocks),
-                        len(blocks),
+                        "Found %d raw answer link elements", len(answer_link_elems)
                     )
-                blocks = enriched_blocks
-            self.logger.info("Discovered %d potential answer blocks", len(blocks))
-            # Process blocks
-            for block in blocks:
-                try:
-                    if self.processed >= (self.answer_limit or self.max_results):
-                        self.logger.info(
-                            "Reached answer limit; stopping block processing."
-                        )
-                        break
-                    # Only extract answer link now
-                    answer_link = None
-                    for lx in ANSWER_LINK_XPATHS:
-                        try:
-                            l_elem = block.find_element(By.XPATH, lx)
-                            href = l_elem.get_attribute("href")
-                            if href and "/answer/" in href:
-                                answer_link = href
-                                break
-                        except Exception:
+                enriched_blocks = []
+                for link in answer_link_elems:
+                    try:
+                        href = link.get_attribute("href") or ""
+                        if not href or href in self.seen_links:
                             continue
-                    if not answer_link:
-                        try:
-                            l_elem = block.find_element(
-                                By.XPATH, ".//a[contains(@href,'/answer/')]"
-                            )
-                            answer_link = l_elem.get_attribute("href")
-                        except Exception:
-                            pass
-                    if not answer_link or answer_link in self.seen_links:
+                        ancestor = link
+                        container = None
+                        for _ in range(6):
+                            ancestor = ancestor.find_element(By.XPATH, "..")
+                            tag = ancestor.tag_name.lower()
+                            if tag in ("article", "div"):
+                                try:
+                                    ancestor.find_element(
+                                        By.XPATH,
+                                        ".//*[contains(@class,'q-text') or contains(@href,'/question/')]",
+                                    )
+                                    container = ancestor
+                                    break
+                                except Exception:
+                                    continue
+                        if container and container.id not in seen_ids:
+                            enriched_blocks.append(container)
+                            seen_ids.add(container.id)
+                    except Exception:
                         continue
-                    self.seen_links.add(answer_link)
-                    self.results.append(answer_link)
-                    self.processed += 1
-                except KeyboardInterrupt:
-                    raise
-                except Exception as e:
-                    self.logger.error("Error processing block: %s", e)
-                    continue
+                if len(enriched_blocks) > len(blocks):
+                    if self.debug:
+                        self.logger.debug(
+                            "Replacing blocks with enriched set: %d vs %d",
+                            len(enriched_blocks),
+                            len(blocks),
+                        )
+                    blocks = enriched_blocks
+                self.logger.info("Discovered %d potential answer blocks", len(blocks))
+                # Process blocks
+                for block in blocks:
+                    try:
+                        if self.processed >= (self.answer_limit or self.max_results):
+                            self.logger.info(
+                                "Reached answer limit; stopping block processing."
+                            )
+                            break
+                        answer_link = None
+                        for lx in ANSWER_LINK_XPATHS:
+                            try:
+                                l_elem = block.find_element(By.XPATH, lx)
+                                href = l_elem.get_attribute("href")
+                                if href and "/answer/" in href:
+                                    answer_link = href
+                                    break
+                            except Exception:
+                                continue
+                        if not answer_link:
+                            try:
+                                l_elem = block.find_element(
+                                    By.XPATH, ".//a[contains(@href,'/answer/')]"
+                                )
+                                answer_link = l_elem.get_attribute("href")
+                            except Exception:
+                                pass
+                        if not answer_link or answer_link in self.seen_links:
+                            continue
+                        self.seen_links.add(answer_link)
+                        self._send_to_kafka(answer_link)
+                        self.processed += 1
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception as e:
+                        self.logger.error("Error processing block: %s", e)
+                        continue
         except KeyboardInterrupt:
             self.logger.warning("Interrupted! Saving collected data...")
-        results = self.results  # keep original reference
-        # After processing blocks extract stats
         try:
             # Re-extract at end to refresh (optional)
             self._extract_profile_stats()
         except Exception as e:
             self.logger.warning("Failed to refresh profile stats: %s", e)
-        return results
+        # Ensure all messages are delivered
+        self.kafka_producer.flush()
+        return self.processed
 
     def _retry(self, func, attempts=2):
         for i in range(attempts):
@@ -345,43 +385,26 @@ class QuoraScraper:
                     raise
                 time.sleep(0.2)
 
-    def save_to_json(self, results, filename):
-        out_path = os.path.join(self.output_dir, self.aggregate_filename)
-        tmp_path = out_path + ".tmp"
-        data = {
-            "profile_stats": self.profile_stats,
-            "answer_limit": self.answer_limit or self.max_results,
-            "collected": len(results),
-            "urls": results,
-        }
+    def _send_to_kafka(self, url):
+        def delivery_report(err, msg):
+            if err is not None:
+                print(f"[KAFKA][FAIL] {url[:100]} | Reason: {err}")
+                self.logger.error(f"[KAFKA][FAIL] {url[:100]} | Reason: {err}")
+            else:
+                print(f"[KAFKA][OK] {url[:100]}")
+                self.logger.info(f"[KAFKA][OK] {url}")
+
         try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, out_path)
-            size = os.path.getsize(out_path)
-            with open(out_path, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-            count = len(loaded.get("urls", []))
-            if count != len(results):
-                self.logger.warning(
-                    "URL count mismatch after save: expected %d got %d",
-                    len(results),
-                    count,
-                )
-            self.logger.info(
-                "Saved %d URLs to %s (size %d bytes, limit %s)",
-                len(results),
-                out_path,
-                size,
-                data["answer_limit"],
+            self.kafka_producer.produce(
+                self.kafka_topic, value=url.encode("utf-8"), callback=delivery_report
             )
+            self.kafka_producer.poll(0)
+            if self.processed % 10 == 0:
+                self.kafka_producer.flush(2)
+                self.logger.debug(f"[KAFKA] Flush after {self.processed} URLs")
         except Exception as e:
-            self.logger.error("Failed saving aggregated file: %s", e)
-            try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except Exception:
-                pass
+            print(f"[KAFKA][EXC] {url[:100]} | Exception: {e}")
+            self.logger.error(f"[KAFKA][EXC] {url[:100]} | Exception: {e}")
 
     def close(self):
         """Close the browser"""
@@ -400,22 +423,25 @@ def main():
         print("Exiting due to WebDriver initialization failure.")
         return
     try:
-        # URL of the Quora profile with proper encoding
+        # Determine profile URL from CLI arg, env var, or default
+        cli_arg = sys.argv[1] if len(sys.argv) > 1 else None
+        env_url = os.environ.get("PROFILE_URL")
         profile_url = (
-            "https://pt.quora.com/profile/Jo%C3%A3o-Eurico-de-Aguiar-Lima/answers"
+            cli_arg
+            or env_url
+            or ("https://pt.quora.com/profile/Jo%C3%A3o-Eurico-de-Aguiar-Lima/answers")
         )
+        src = "CLI" if cli_arg else ("PROFILE_URL env" if env_url else "default")
+        print(f"Using profile URL from {src}: {profile_url}")
         print("\nPress Ctrl+C at any time to stop and save current progress\n")
         # Extract content
         print("Starting extraction...")
-        results = scraper.extract_content(profile_url)
-        scraper.save_to_json(results, "")
-        print(f"\nExtracted and saved {len(results)} QA pairs")
+        total_sent = scraper.extract_content(profile_url)
+        print(f"\nExtracted and sent {total_sent} URLs to Kafka")
         if scraper.profile_stats:
             print("Profile stats:", scraper.profile_stats)
     except KeyboardInterrupt:
         print("\nFinal cleanup...")
-        if scraper.results:
-            scraper.save_to_json(scraper.results, "")
     finally:
         scraper.close()
 

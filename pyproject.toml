@@ -3,7 +3,13 @@ name = "quorascrapper"
 version = "0.1.0"
 description = "Quora profile Q&A scraper using Selenium"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
     "selenium>=4.30.0",
+    "confluent-kafka>=2.3.0",
 ]
+
+[tool.uv.scripts]
+run = "python quora_scraper.py"
+test = "uvx pytest -q"
+build = "uv build"
