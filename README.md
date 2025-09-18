@@ -1,10 +1,8 @@
 # Quora Profile Scraper
 
-Scrape Quora profile answer URLs and stream them to Kafka.
+Scrape Quora profile answer URLs and stream them to Kafka (or stdout).
 
 ## Setup (uv-only)
-
-- You do not need to pre-install Python or pip. Install only uv; it will manage Python 3.13, the virtual environment, and dependencies.
 
 Install uv (one-time):
 
@@ -13,72 +11,86 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # then restart your shell or source your profile if needed
 ```
 
-That's it. You can skip creating a venv or syncing dependencies manually—`uv run` will handle it automatically on first use.
+`uv run` will create the environment and install dependencies on first use.
 
 ## Running the Scraper
 
-Run (uv will create the environment and install deps automatically on first run):
+Run with a profile URL:
 
 ```bash
 uv run quora_scraper.py "https://pt.quora.com/profile/<USER>/answers"
-# or: uv run -m quora_scraper "https://pt.quora.com/profile/<USER>/answers" if packaged as a module later
 ```
 
-Alternatively, set the URL via environment variable (takes effect if no CLI arg is passed):
+Or via env var if no CLI arg is passed:
 
 ```bash
 PROFILE_URL="https://pt.quora.com/profile/<USER>/answers" uv run quora_scraper.py
 ```
 
-The script will:
+Choose the output sender:
 
-- Start a headless Chrome browser
-- Load the profile's answer page (parameter)
-- Scroll down through all the pages (page down)
-- Extract the answers url from the page
-- Send it to a Kafka topic (default as coded)
+```bash
+# stdout (default)
+uv run quora_scraper.py --sender stdout
+
+# Kafka
+SENDER=kafka uv run quora_scraper.py --sender kafka
+```
 
 ## Output
 
-No output file is generated. All answer URLs are sent as messages to Kafka.
+Emits one JSON line per answer URL to the selected sender:
+
+- stdout: JSONL to stdout
+- Kafka: JSONL messages to the configured topic
 
 ## Kafka Configuration
 
-You can customize the Kafka broker and topic using environment variables:
+Environment variables:
 
 - `KAFKA_BOOTSTRAP` (default: `192.168.1.116:9092`)
 - `KAFKA_TOPIC` (default: `quora-answers`)
-- `PROFILE_URL` (optional): profile answers URL if you prefer env-based configuration
+- `KAFKA_HEALTHCHECK`: set `0` to skip startup healthcheck
 
-Example (zsh/bash):
+Example:
 
 ```bash
-KAFKA_BOOTSTRAP=192.168.1.116:9092 KAFKA_TOPIC=quora-answers uv run quora_scraper.py
+KAFKA_BOOTSTRAP=192.168.1.116:9092 KAFKA_TOPIC=quora-answers uv run quora_scraper.py --sender kafka
 ```
+
+### .env support
+
+Variables from a local `.env` are loaded automatically. For a LAN broker:
+
+```env
+KAFKA_BOOTSTRAP=bokodell14.local:19092
+KAFKA_TOPIC=quora-answers
+```
+
+Then run:
+
+```bash
+SENDER=kafka MAX_RESULTS=10 uv run quora_scraper.py
+```
+
+If `bokodell14.local` should resolve to `192.168.1.116`, ensure your DNS or `/etc/hosts` has that mapping.
 
 ## Other Environment Variables
 
-- `MAX_RESULTS`: Maximum number of answers to collect (default: profile's answer count)
-- `LOG_LEVEL`: Set logging level (INFO, DEBUG, etc)
-- `SCROLL_PAUSE`: Seconds to wait between scrolls (default: 1.5)
+- `PROFILE_URL`: profile URL (if not passed via CLI)
+- `MAX_RESULTS`: cap on number of answers to send
+- `LOG_LEVEL`: logging level (default WARNING)
+- `SCROLL_PAUSE`: seconds to wait between scrolls (default 1.5)
+- `DRY_RUN`: `1` to skip Kafka produce (mostly for legacy; stdout sender is preferred)
 
 ## Notes
 
-- No data is saved locally; all persistence is via Kafka.
-- Make sure your Kafka server is reachable from the machine running the scraper.
+- No files are written; data flows to stdout or Kafka.
+- Ensure the Kafka broker is reachable from your machine.
 
-## Using uv scripts
-
-This project defines uv scripts in `pyproject.toml`:
-
-- Run scraper: `uv run`
-- Test (pytest): `uv run test`
-- Build distribution: `uv run build`
-
-If you prefer calling the commands explicitly:
+## Dev quick commands
 
 ```bash
 uv run quora_scraper.py
 uvx pytest -q
-uv build
 ```

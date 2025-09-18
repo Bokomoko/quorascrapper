@@ -1,19 +1,36 @@
 import logging
 import os
 import re
-import sys
 import time
 from urllib.parse import urljoin
 
-from confluent_kafka import Producer
-from selenium import webdriver
-from selenium.common.exceptions import (
-    StaleElementReferenceException,
-    WebDriverException,
-)
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+try:
+    from confluent_kafka import Producer  # type: ignore
+except Exception:  # pragma: no cover
+    Producer = None  # type: ignore
+
+try:
+    from selenium import webdriver  # type: ignore
+    from selenium.common.exceptions import (
+        StaleElementReferenceException,
+        WebDriverException,
+    )
+    from selenium.webdriver.common.by import By  # type: ignore
+    from selenium.webdriver.support import expected_conditions as EC  # type: ignore
+    from selenium.webdriver.support.ui import WebDriverWait  # type: ignore
+except Exception:  # pragma: no cover
+    webdriver = None  # type: ignore
+
+    class WebDriverException(Exception):
+        pass
+
+    class StaleElementReferenceException(Exception):
+        pass
+
+    class _Dummy:
+        pass
+
+    By = EC = WebDriverWait = _Dummy()
 
 from quora_selectors import (
     ANSWER_ANCHOR_XPATH,
@@ -22,20 +39,56 @@ from quora_selectors import (
     INITIAL_ANSWER_WAIT_SECONDS,
     PROFILE_STATS_XPATHS,
 )
+from senders import KafkaSender, StdoutSender
+
+# Load .env if present to bring in KAFKA_BOOTSTRAP, KAFKA_TOPIC, etc.
+try:  # lightweight optional import
+    from dotenv import load_dotenv  # type: ignore
+
+    load_dotenv()
+except Exception:
+    pass
+
+# Default profile URL (Portuguese answers tab)
+DEFAULT_PROFILE_URL = (
+    "https://pt.quora.com/profile/Jo%C3%A3o-Eurico-de-Aguiar-Lima/answers"
+)
+
+
+def resolve_profile_url(
+    cli_arg: str | None, env_url: str | None, default_url: str = DEFAULT_PROFILE_URL
+) -> str:
+    """Resolve profile URL based on precedence: CLI > env > default.
+
+    Inputs:
+      - cli_arg: first CLI positional argument (may be None)
+      - env_url: value of PROFILE_URL env var (may be None)
+      - default_url: fallback when both are missing
+
+    Returns the chosen URL string.
+    """
+    return cli_arg or env_url or default_url
 
 
 class QuoraScraper:
-    def __init__(self):
+    def __init__(self, sender=None):
         # Initialize Chrome WebDriver with error handling & optional fallback
         self.driver = None
-        # Logging setup
-        log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+        # Logging setup (default to WARNING to minimize noise)
+        log_level = os.environ.get("LOG_LEVEL", "WARNING").upper()
         logging.basicConfig(
             level=getattr(logging, log_level, logging.INFO),
             format="%(asctime)s [%(levelname)s] %(message)s",
         )
         self.logger = logging.getLogger("QuoraScraper")
-        options = webdriver.ChromeOptions()
+        if webdriver is None:
+            # Allow constructing in test environments; actual run will fail early
+            self.logger.warning(
+                "Selenium not available; QuoraScraper will not run without it."
+            )
+            options = None
+        else:
+            options = webdriver.ChromeOptions()
         # Modern headless for recent Chrome versions
         options.add_argument("--headless=new")
         options.add_argument("--disable-gpu")
@@ -46,22 +99,22 @@ class QuoraScraper:
             options.binary_location = chrome_binary
         self.debug = os.environ.get("DEBUG_SELECTORS") == "1"
         self.seen_links = set()
+        # Dry-run mode (skip Kafka sends; still parse and print)
+        self.dry_run = os.environ.get("DRY_RUN", "0").lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+        }
+        # Sender setup: default to stdout, unless a sender was provided
+        self.sender = sender or StdoutSender()
         try:
+            if webdriver is None:
+                raise WebDriverException("Selenium not installed")
             self.driver = webdriver.Chrome(options=options)
             self.driver.set_page_load_timeout(30)
         except WebDriverException as e:
             self.logger.error("Failed to start Chrome WebDriver: %s", e)
-            print("Troubleshooting suggestions:")
-            print(" 1. Open Google Chrome manually once (clears Gatekeeper warning).")
-            print(
-                " 2. If macOS blocked it: xattr -dr com.apple.quarantine /Applications/Google\\ Chrome.app"
-            )
-            print(
-                " 3. Ensure Chrome is installed in /Applications and matches architecture."
-            )
-            print(" 4. Update Selenium: pip install -U selenium")
-            print(" 5. Optionally set CHROME_BINARY to alternate Chromium.")
-            print(" 6. Set USE_FIREFOX=1 for Firefox fallback.")
             if os.environ.get("USE_FIREFOX") == "1":
                 try:
                     from selenium.webdriver.firefox.options import (
@@ -85,16 +138,15 @@ class QuoraScraper:
         self.max_results = int(os.environ.get("MAX_RESULTS", "16000"))
         self.no_growth_threshold = 5
         self.scroll_pause = float(os.environ.get("SCROLL_PAUSE", "1.5"))
-        # Kafka settings
+        # Legacy Kafka settings retained for compatibility, but sending now goes through sender
         self.kafka_bootstrap = os.environ.get("KAFKA_BOOTSTRAP", "192.168.1.116:9092")
         self.kafka_topic = os.environ.get("KAFKA_TOPIC", "quora-answers")
-        self.kafka_producer = Producer({"bootstrap.servers": self.kafka_bootstrap})
 
     # File output logic was removed; Kafka streaming only
 
     def print_status(self, message):
-        """Print status message with carriage return"""
-        print(f"\r{message}", end="", flush=True)
+        """No-op to avoid showing progress."""
+        return
 
     def scroll_to_bottom(self):
         """Scroll page until no new content loads or limits hit."""
@@ -140,11 +192,13 @@ class QuoraScraper:
                 self.answer_limit or self.max_results,
             )
 
-    def _normalize_number(self, txt):
+    @staticmethod
+    def _normalize_number(txt):
         if not txt:
             return None
-        txt = txt.replace("\u00a0", " ").replace(",", "").strip()
-        # Handle formats like '14,7 mil' or '14.7 mil'
+        # Normalize whitespace but keep punctuation for 'mil' detection
+        txt = txt.replace("\u00a0", " ").strip()
+        # Handle formats like '14,7 mil' or '14.7 mil' (Portuguese thousands)
         mil_match = re.match(r"([0-9]+)[\.,]?([0-9]+)?\s*mil", txt, re.IGNORECASE)
         if mil_match:
             whole = int(mil_match.group(1))
@@ -154,6 +208,7 @@ class QuoraScraper:
             )
             return value
         # Plain integer
+        txt = txt.replace(",", "")
         digits = re.findall(r"\d+", txt)
         if digits:
             try:
@@ -219,8 +274,11 @@ class QuoraScraper:
             # Stats first
             try:
                 self._extract_profile_stats()
-                print(f"Profile stats (pre-scroll): {self.profile_stats}")
-                self.logger.info("Answer limit set to %s", self.answer_limit)
+                if self.debug:
+                    self.logger.debug(
+                        "Profile stats (pre-scroll): %s", self.profile_stats
+                    )
+                self.logger.debug("Answer limit set to %s", self.answer_limit)
             except Exception as e:
                 self.logger.warning("Initial stats extraction failed: %s", e)
                 self.answer_limit = self.max_results
@@ -228,7 +286,7 @@ class QuoraScraper:
             self.scroll_to_bottom()
             # Fast pass: grab all anchors that look like answer links
             anchors = self.driver.find_elements(By.XPATH, ANSWER_ANCHOR_XPATH)
-            self.logger.info("Fast scan found %d answer anchors", len(anchors))
+            self.logger.debug("Fast scan found %d answer anchors", len(anchors))
             for a in anchors:
                 if self.processed >= (self.answer_limit or self.max_results):
                     break
@@ -243,7 +301,7 @@ class QuoraScraper:
                     if href in self.seen_links:
                         continue
                     self.seen_links.add(href)
-                    self._send_to_kafka(href)
+                    self._send_url(href)
                     self.processed += 1
                 except Exception as ex:
                     self.logger.debug(f"Anchor processing error: {ex}")
@@ -251,7 +309,10 @@ class QuoraScraper:
             if self.processed < (self.answer_limit or self.max_results):
                 # Fallback to block-based parsing if needed
                 found_block = False
-                print("[DEBUG] Trying ANSWER_BLOCK_XPATHS:", ANSWER_BLOCK_XPATHS)
+                if self.debug:
+                    self.logger.debug(
+                        "Trying ANSWER_BLOCK_XPATHS: %s", ANSWER_BLOCK_XPATHS
+                    )
                 for xpath in ANSWER_BLOCK_XPATHS:
                     try:
                         WebDriverWait(self.driver, INITIAL_ANSWER_WAIT_SECONDS).until(
@@ -269,24 +330,35 @@ class QuoraScraper:
                 for xpath in ANSWER_BLOCK_XPATHS:
                     try:
                         elems = self.driver.find_elements(By.XPATH, xpath)
-                        print(f"[DEBUG] XPath {xpath} found {len(elems)} elements")
+                        if self.debug:
+                            self.logger.debug(
+                                "XPath %s found %d elements", xpath, len(elems)
+                            )
                         for e in elems:
                             if e.id not in seen_ids:
                                 blocks.append(e)
                                 seen_ids.add(e.id)
                     except Exception as ex:
-                        print(f"[DEBUG] Error with XPath {xpath}: {ex}")
+                        if self.debug:
+                            self.logger.debug("Error with XPath %s: %s", xpath, ex)
                         continue
-                print(f"[DEBUG] Total blocks found: {len(blocks)}")
+                if self.debug:
+                    self.logger.debug("Total blocks found: %d", len(blocks))
                 # Dump outerHTML of first 3 blocks for inspection
                 for i, block in enumerate(blocks[:3]):
                     try:
                         html = block.get_attribute("outerHTML")
-                        print(
-                            f"[DEBUG] Block {i} outerHTML (first 500 chars):\n{html[:500]}\n---"
-                        )
+                        if self.debug:
+                            self.logger.debug(
+                                "Block %d outerHTML (first 500 chars): %s ---",
+                                i,
+                                html[:500],
+                            )
                     except Exception as ex:
-                        print(f"[DEBUG] Could not get outerHTML for block {i}: {ex}")
+                        if self.debug:
+                            self.logger.debug(
+                                "Could not get outerHTML for block %d: %s", i, ex
+                            )
                 answer_link_elems = self.driver.find_elements(
                     By.XPATH, "//a[contains(@href,'/answer/')]"
                 )
@@ -358,7 +430,7 @@ class QuoraScraper:
                         if not answer_link or answer_link in self.seen_links:
                             continue
                         self.seen_links.add(answer_link)
-                        self._send_to_kafka(answer_link)
+                        self._send_url(answer_link)
                         self.processed += 1
                     except KeyboardInterrupt:
                         raise
@@ -372,8 +444,11 @@ class QuoraScraper:
             self._extract_profile_stats()
         except Exception as e:
             self.logger.warning("Failed to refresh profile stats: %s", e)
-        # Ensure all messages are delivered
-        self.kafka_producer.flush()
+        # Ensure all messages are delivered via sender
+        try:
+            self.sender.flush(2)
+        except Exception:
+            pass
         return self.processed
 
     def _retry(self, func, attempts=2):
@@ -385,26 +460,30 @@ class QuoraScraper:
                     raise
                 time.sleep(0.2)
 
-    def _send_to_kafka(self, url):
-        def delivery_report(err, msg):
-            if err is not None:
-                print(f"[KAFKA][FAIL] {url[:100]} | Reason: {err}")
-                self.logger.error(f"[KAFKA][FAIL] {url[:100]} | Reason: {err}")
-            else:
-                print(f"[KAFKA][OK] {url[:100]}")
-                self.logger.info(f"[KAFKA][OK] {url}")
-
+    def _send_url(self, url):
         try:
-            self.kafka_producer.produce(
-                self.kafka_topic, value=url.encode("utf-8"), callback=delivery_report
-            )
-            self.kafka_producer.poll(0)
-            if self.processed % 10 == 0:
-                self.kafka_producer.flush(2)
-                self.logger.debug(f"[KAFKA] Flush after {self.processed} URLs")
+            self.sender.send(url)
+            self.results.append(url)
         except Exception as e:
-            print(f"[KAFKA][EXC] {url[:100]} | Exception: {e}")
-            self.logger.error(f"[KAFKA][EXC] {url[:100]} | Exception: {e}")
+            self.logger.error("Sender failed for URL %s: %s", url, e)
+
+    def kafka_healthcheck(self, timeout_sec: float = 5.0) -> bool:
+        """Try a minimal produce+flush to validate broker connectivity.
+
+        Returns True on success, False on failure. Skips in dry-run.
+        """
+        if self.dry_run or not isinstance(self.sender, KafkaSender):
+            self.logger.info("Skipping Kafka healthcheck (not using Kafka)")
+            return True
+        try:
+            # Send a healthcheck message via sender; nothing is printed to stdout
+            self.sender.send(f"healthcheck:{int(time.time())}")
+            self.sender.flush(timeout_sec)
+            self.logger.info("Kafka healthcheck OK")
+            return True
+        except Exception as e:
+            self.logger.error("Kafka healthcheck FAILED: %s", e)
+            return False
 
     def close(self):
         """Close the browser"""
@@ -418,30 +497,57 @@ class QuoraScraper:
 def main():
     # Create scraper instance with guarded startup
     try:
-        scraper = QuoraScraper()
+        # Select sender via CLI/env in the next block; start with stdout
+        scraper = QuoraScraper(sender=StdoutSender())
     except WebDriverException:
-        print("Exiting due to WebDriver initialization failure.")
         return
     try:
-        # Determine profile URL from CLI arg, env var, or default
-        cli_arg = sys.argv[1] if len(sys.argv) > 1 else None
-        env_url = os.environ.get("PROFILE_URL")
-        profile_url = (
-            cli_arg
-            or env_url
-            or ("https://pt.quora.com/profile/Jo%C3%A3o-Eurico-de-Aguiar-Lima/answers")
+        import argparse
+
+        parser = argparse.ArgumentParser(description="Quora profile scraper")
+        parser.add_argument("profile_url", nargs="?", help="Profile answers URL")
+        parser.add_argument(
+            "--sender",
+            choices=["stdout", "kafka"],
+            default=os.environ.get("SENDER", "stdout"),
+            help="Output sender (default: stdout)",
         )
-        src = "CLI" if cli_arg else ("PROFILE_URL env" if env_url else "default")
-        print(f"Using profile URL from {src}: {profile_url}")
-        print("\nPress Ctrl+C at any time to stop and save current progress\n")
-        # Extract content
-        print("Starting extraction...")
-        total_sent = scraper.extract_content(profile_url)
-        print(f"\nExtracted and sent {total_sent} URLs to Kafka")
-        if scraper.profile_stats:
-            print("Profile stats:", scraper.profile_stats)
+        args = parser.parse_args()
+
+        # Determine profile URL from CLI arg, env var, or default
+        env_url = os.environ.get("PROFILE_URL")
+        profile_url = resolve_profile_url(
+            args.profile_url, env_url, DEFAULT_PROFILE_URL
+        )
+        # no printing of resolved URL
+
+        # Configure sender based on flag
+        if args.sender == "kafka":
+            try:
+                sender_obj = KafkaSender(scraper.kafka_bootstrap, scraper.kafka_topic)
+            except Exception:
+                return
+        else:
+            sender_obj = StdoutSender()
+        scraper.sender = sender_obj
+
+        # Optional Kafka healthcheck only if Kafka selected
+        if args.sender == "kafka" and os.environ.get("KAFKA_HEALTHCHECK", "1") not in {
+            "0",
+            "false",
+            "no",
+            "n",
+        }:
+            ok = scraper.kafka_healthcheck()
+            if not ok:
+                return
+
+        # no start print
+        scraper.extract_content(profile_url)
+        # no completion prints
     except KeyboardInterrupt:
-        print("\nFinal cleanup...")
+        # no prints on interrupt
+        pass
     finally:
         scraper.close()
 

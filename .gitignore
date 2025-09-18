@@ -18,3 +18,4 @@ wheels/
 João Eurico de Aguiar Lima - Quora_files/
 # ignore qa_files/
 qa_files/
+.env
