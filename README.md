@@ -48,14 +48,15 @@ Emits one JSON line per answer URL to the selected sender:
 
 Environment variables:
 
-- `KAFKA_BOOTSTRAP` (default: `192.168.1.116:9092`)
+- `KAFKA_BOOTSTRAP` (default: `192.168.1.116:19092`)
 - `KAFKA_TOPIC` (default: `quora-answers`)
+- `KAFKA_HEALTHCHECK_TOPIC` (default: `healthcheck`)
 - `KAFKA_HEALTHCHECK`: set `0` to skip startup healthcheck
 
 Example:
 
 ```bash
-KAFKA_BOOTSTRAP=192.168.1.116:9092 KAFKA_TOPIC=quora-answers uv run quora_scraper.py --sender kafka
+KAFKA_BOOTSTRAP=192.168.1.116:19092 KAFKA_TOPIC=quora-answers uv run quora_scraper.py --sender kafka
 ```
 
 ### .env support

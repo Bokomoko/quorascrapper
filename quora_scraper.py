@@ -97,6 +97,11 @@ class QuoraScraper:
         chrome_binary = os.environ.get("CHROME_BINARY")
         if chrome_binary:
             options.binary_location = chrome_binary
+        self.logger.debug(
+            "Initializing Chrome WebDriver (headless=%s, binary=%s)",
+            "new",
+            chrome_binary or "auto",
+        )
         self.debug = os.environ.get("DEBUG_SELECTORS") == "1"
         self.seen_links = set()
         # Dry-run mode (skip Kafka sends; still parse and print)
@@ -113,6 +118,15 @@ class QuoraScraper:
                 raise WebDriverException("Selenium not installed")
             self.driver = webdriver.Chrome(options=options)
             self.driver.set_page_load_timeout(30)
+            try:
+                caps = getattr(self.driver, "capabilities", {}) or {}
+                self.logger.debug(
+                    "WebDriver started: browser=%s version=%s",
+                    caps.get("browserName", "chrome"),
+                    caps.get("browserVersion") or caps.get("version") or "unknown",
+                )
+            except Exception:
+                self.logger.debug("WebDriver started (capabilities unavailable)")
         except WebDriverException as e:
             self.logger.error("Failed to start Chrome WebDriver: %s", e)
             if os.environ.get("USE_FIREFOX") == "1":
@@ -139,8 +153,11 @@ class QuoraScraper:
         self.no_growth_threshold = 5
         self.scroll_pause = float(os.environ.get("SCROLL_PAUSE", "1.5"))
         # Legacy Kafka settings retained for compatibility, but sending now goes through sender
-        self.kafka_bootstrap = os.environ.get("KAFKA_BOOTSTRAP", "192.168.1.116:9092")
+        self.kafka_bootstrap = os.environ.get("KAFKA_BOOTSTRAP", "192.168.1.116:19092")
         self.kafka_topic = os.environ.get("KAFKA_TOPIC", "quora-answers")
+        self.kafka_healthcheck_topic = os.environ.get(
+            "KAFKA_HEALTHCHECK_TOPIC", "healthcheck"
+        )
 
     # File output logic was removed; Kafka streaming only
 
@@ -155,8 +172,9 @@ class QuoraScraper:
         last_content_count = 0
         stagnant_scrolls = 0
         self.logger.info("Starting scroll (no max scroll limit)...")
-        # Infinite scroll until stagnation or item limit
-        while self.processed < (self.answer_limit or self.max_results):
+        # Infinite scroll until stagnation or item limit; while scrolling, emit URLs incrementally
+        limit = self.answer_limit or self.max_results
+        while self.processed < limit:
             scroll_count += 1
             self.print_status(
                 f"Scroll {scroll_count} - Items {last_content_count} - Collected {self.processed}/{self.answer_limit or self.max_results}"
@@ -165,9 +183,8 @@ class QuoraScraper:
                 "window.scrollTo(0, document.body.scrollHeight);"
             )
             time.sleep(self.scroll_pause)
-            current_content = len(
-                self.driver.find_elements(By.XPATH, ANSWER_ANCHOR_XPATH)
-            )
+            anchors = self.driver.find_elements(By.XPATH, ANSWER_ANCHOR_XPATH)
+            current_content = len(anchors)
             if current_content > last_content_count:
                 last_content_count = current_content
                 stagnant_scrolls = 0
@@ -186,6 +203,26 @@ class QuoraScraper:
                     )
                     break
                 last_height = new_height
+            # Incremental processing: extract and send answer URLs found so far
+            for a in anchors:
+                if self.processed >= limit:
+                    break
+                try:
+                    href = a.get_attribute("href")
+                    if not href:
+                        continue
+                    href = urljoin(self.driver.current_url, href)
+                    if "/answer/" not in href:
+                        continue
+                    if href in self.seen_links:
+                        continue
+                    self.seen_links.add(href)
+                    self.logger.debug("Found answer URL: %s", href)
+                    self._send_url(href)
+                    self.processed += 1
+                except Exception as ex:
+                    self.logger.debug("Anchor processing error (scroll loop): %s", ex)
+                    continue
         if self.processed >= (self.answer_limit or self.max_results):
             self.logger.info(
                 "Reached answer limit (%s) during scroll",
@@ -267,45 +304,75 @@ class QuoraScraper:
         self.logger.info("Loading profile: %s", url)
         self.driver.get(url)
         try:
+            # Log early navigation details
+            ready = self.driver.execute_script("return document.readyState")
+            self.logger.debug("Initial readyState: %s", ready)
+        except Exception:
+            pass
+        try:
             WebDriverWait(self.driver, 15).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
             time.sleep(2)
+            try:
+                title = self.driver.title
+                self.logger.debug("Page loaded: title='%s'", title)
+            except Exception:
+                pass
             # Stats first
             try:
                 self._extract_profile_stats()
-                if self.debug:
-                    self.logger.debug(
-                        "Profile stats (pre-scroll): %s", self.profile_stats
-                    )
-                self.logger.debug("Answer limit set to %s", self.answer_limit)
+                self.logger.debug("Profile stats (pre-scroll): %s", self.profile_stats)
+                self.logger.debug(
+                    "answers_total=%s, answer_limit=%s",
+                    self.profile_stats.get("answers"),
+                    self.answer_limit,
+                )
+                try:
+                    answers_total = self.profile_stats.get("answers")
+                    if answers_total is not None:
+                        self.logger.info(
+                            "Profile reports %s answers; scraping up to %s",
+                            answers_total,
+                            self.answer_limit,
+                        )
+                    else:
+                        self.logger.info(
+                            "Profile answers count unknown; scraping up to %s",
+                            self.answer_limit,
+                        )
+                except Exception:
+                    # Best-effort logging; ignore
+                    pass
             except Exception as e:
                 self.logger.warning("Initial stats extraction failed: %s", e)
                 self.answer_limit = self.max_results
-            # Scroll
+            # Scroll (now streams URLs incrementally)
             self.scroll_to_bottom()
-            # Fast pass: grab all anchors that look like answer links
-            anchors = self.driver.find_elements(By.XPATH, ANSWER_ANCHOR_XPATH)
-            self.logger.debug("Fast scan found %d answer anchors", len(anchors))
-            for a in anchors:
-                if self.processed >= (self.answer_limit or self.max_results):
-                    break
-                try:
-                    href = a.get_attribute("href")
-                    if not href:
+            # If nothing processed during scrolling (e.g., short page), do a fast pass now
+            if self.processed < (self.answer_limit or self.max_results):
+                anchors = self.driver.find_elements(By.XPATH, ANSWER_ANCHOR_XPATH)
+                self.logger.debug("Fast scan found %d answer anchors", len(anchors))
+                for a in anchors:
+                    if self.processed >= (self.answer_limit or self.max_results):
+                        break
+                    try:
+                        href = a.get_attribute("href")
+                        if not href:
+                            continue
+                        # Normalize to absolute URL (handles potential relative)
+                        href = urljoin(url, href)
+                        if "/answer/" not in href:
+                            continue
+                        if href in self.seen_links:
+                            continue
+                        self.seen_links.add(href)
+                        self.logger.debug("Found answer URL: %s", href)
+                        self._send_url(href)
+                        self.processed += 1
+                    except Exception as ex:
+                        self.logger.debug(f"Anchor processing error: {ex}")
                         continue
-                    # Normalize to absolute URL (handles potential relative)
-                    href = urljoin(url, href)
-                    if "/answer/" not in href:
-                        continue
-                    if href in self.seen_links:
-                        continue
-                    self.seen_links.add(href)
-                    self._send_url(href)
-                    self.processed += 1
-                except Exception as ex:
-                    self.logger.debug(f"Anchor processing error: {ex}")
-                    continue
             if self.processed < (self.answer_limit or self.max_results):
                 # Fallback to block-based parsing if needed
                 found_block = False
@@ -430,6 +497,7 @@ class QuoraScraper:
                         if not answer_link or answer_link in self.seen_links:
                             continue
                         self.seen_links.add(answer_link)
+                        self.logger.debug("Found answer URL: %s", answer_link)
                         self._send_url(answer_link)
                         self.processed += 1
                     except KeyboardInterrupt:
@@ -446,7 +514,13 @@ class QuoraScraper:
             self.logger.warning("Failed to refresh profile stats: %s", e)
         # Ensure all messages are delivered via sender
         try:
-            self.sender.flush(2)
+            # Ensure delivery of all pending messages (increase timeout for reliability)
+            self.sender.flush(15)
+        except Exception:
+            pass
+        # Final tally
+        try:
+            self.logger.info("Captured %d answers in total", self.processed)
         except Exception:
             pass
         return self.processed
@@ -462,8 +536,10 @@ class QuoraScraper:
 
     def _send_url(self, url):
         try:
-            self.sender.send(url)
+            self.logger.debug("Sending to sender: %s", url)
+            self.sender.send({"url": url})
             self.results.append(url)
+            self.logger.debug("Sent successfully: %s", url)
         except Exception as e:
             self.logger.error("Sender failed for URL %s: %s", url, e)
 
@@ -476,10 +552,15 @@ class QuoraScraper:
             self.logger.info("Skipping Kafka healthcheck (not using Kafka)")
             return True
         try:
-            # Send a healthcheck message via sender; nothing is printed to stdout
-            self.sender.send(f"healthcheck:{int(time.time())}")
-            self.sender.flush(timeout_sec)
+            # Send a healthcheck message to a dedicated topic; nothing is printed to stdout
+            hc_sender = KafkaSender(self.kafka_bootstrap, self.kafka_healthcheck_topic)
+            hc_sender.send({"url": f"healthcheck:{int(time.time())}"})
+            hc_sender.flush(timeout_sec)
             self.logger.info("Kafka healthcheck OK")
+            try:
+                hc_sender.close()
+            except Exception:
+                pass
             return True
         except Exception as e:
             self.logger.error("Kafka healthcheck FAILED: %s", e)
@@ -492,6 +573,11 @@ class QuoraScraper:
                 self.driver.quit()
             except Exception:
                 pass
+        # Close sender if it supports close
+        try:
+            self.sender.close()
+        except Exception:
+            pass
 
 
 def main():

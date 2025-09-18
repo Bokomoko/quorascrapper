@@ -22,12 +22,7 @@
 
 ## Environment variables
 
-- PROFILE_URL: profile answers URL (optional; CLI arg takes precedence)
-- KAFKA_BOOTSTRAP: Kafka bootstrap servers (default: 192.168.1.116:9092)
-- KAFKA_TOPIC: Kafka topic (default: quora-answers)
-- LOG_LEVEL: Logging level (default: INFO)
-- SCROLL_PAUSE: Delay between scrolls in seconds (default: 1.5)
-- MAX_RESULTS: Max answers to collect (default: capped by profile stats)
+- KAFKA_HEALTHCHECK_TOPIC: Kafka topic for health checks (default: healthcheck)
 
 ## Notes
 
