@@ -1,0 +1,42 @@
+---
+description: Use FigJam (Figma MCP) for diagrams and visual illustrations instead of chat-only markdown
+alwaysApply: true
+---
+
+# FigJam for illustrations
+
+When the user asks for a diagram, architecture view, flow, timeline, ERD, state machine, or any **visual illustration**, create it in **FigJam** and return the board link. Do not default to ASCII art or fenced Mermaid in chat unless the user explicitly wants text-only output.
+
+## When to use FigJam
+
+- Architecture / data pipeline / system diagrams
+- Flowcharts, sequence diagrams, ERDs, state diagrams, Gantt charts
+- Brainstorms, retros, meeting boards, stickies with connectors
+- Any deliverable described as "illustration", "diagram", "visual", or "board"
+
+## How to create (Figma MCP)
+
+1. **Diagrams from Mermaid** — Load the `figma-generate-diagram` skill, then call `generate_diagram` with valid Mermaid (no emojis, no `\n` in labels, camelCase node IDs).
+2. **Custom boards** (stickies, sections, connectors, shapes) — Load `figma-use-figjam`, then use `use_figma` with `skillNames: "figma-use-figjam"`.
+3. **Inspect existing boards** — Use `get_figjam` (not `get_metadata`; that is design-only).
+4. **New empty board** — Load `figma-create-new-file` before `create_new_file` with editor type `figjam`.
+
+## Tool choice
+
+| Need | Tool |
+|------|------|
+| flowchart, sequence, ERD, state, gantt | `generate_diagram` |
+| annotations, colors, stickies on generated diagram | hybrid: `generate_diagram` + `use_figma` (see figma-generate-diagram workflow) |
+| freeform board / workshop layout | `use_figma` (FigJam APIs only) |
+
+Unsupported by `generate_diagram` (say so or build with `use_figma`): pie chart, mindmap, class diagram, C4, git graph, quadrant chart.
+
+## Quality
+
+- Base diagrams on real code, docs, or user input — do not invent services or edges.
+- After generation, give the user the **FigJam URL** and a one-line summary of what the board shows.
+- For this repo (scraper → Kafka → MongoDB), prefer architecture/sequence diagrams in FigJam when explaining the pipeline.
+
+## Fallback
+
+Use markdown Mermaid or ASCII only if Figma MCP is unavailable, the user refuses FigJam, or they ask for copy-paste text in the repo (e.g. README).
