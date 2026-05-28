@@ -13,7 +13,7 @@ services:
       - host
     depends_on: []
     healthcheck:
-      test: ["CMD", "uv", "run", "python", "-c", "import sys; sys.exit(0)"]
+      test: ["CMD", "uv", "run", "healthcheck.py", "subscriber"]
       interval: 30s
       timeout: 10s
       retries: 3

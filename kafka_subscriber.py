@@ -20,7 +20,7 @@ import os
 import signal
 import sys
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 try:
     from confluent_kafka import Consumer, KafkaError  # type: ignore
@@ -29,7 +29,7 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from pymongo import MongoClient  # type: ignore
+    from pymongo import ASCENDING, MongoClient  # type: ignore
     from pymongo.errors import PyMongoError  # type: ignore
 except ImportError:
     print("Error: pymongo not installed. Run: uv add pymongo")
@@ -46,6 +46,10 @@ except ImportError:
 from logging_setup import init_logging  # unified logging
 
 logger = init_logging("subscriber")
+
+ProcessResult = Literal["stored", "skipped", "retry"]
+
+_active_subscriber: Optional["KafkaMongoSubscriber"] = None
 
 
 class KafkaMongoSubscriber:
@@ -84,8 +88,7 @@ class KafkaMongoSubscriber:
                 "bootstrap.servers": self.kafka_bootstrap,
                 "group.id": self.kafka_group_id,
                 "auto.offset.reset": "earliest",
-                "enable.auto.commit": True,
-                "auto.commit.interval.ms": 1000,
+                "enable.auto.commit": False,
             }
 
             self.consumer = Consumer(consumer_config)
@@ -114,6 +117,13 @@ class KafkaMongoSubscriber:
             self.mongo_db = self.mongo_client[self.mongodb_database]
             self.mongo_collection = self.mongo_db[self.mongodb_collection]
 
+            self.mongo_collection.create_index(
+                [("hash", ASCENDING)],
+                unique=True,
+                sparse=True,
+                name="hash_unique",
+            )
+
             logger.info(
                 "mongodb_connected",
                 extra={
@@ -127,20 +137,38 @@ class KafkaMongoSubscriber:
             logger.error(f"Failed to connect to MongoDB: {e}")
             raise
 
-    def process_message(self, message_value: str) -> bool:
-        """Process a single Kafka message and store in MongoDB"""
-        try:
-            # Parse JSON message
-            data = json.loads(message_value)
+    def process_message(self, message_value: str) -> ProcessResult:
+        """Process a single Kafka message and store in MongoDB.
 
-            # Add metadata
+        Returns:
+            stored: written to MongoDB (commit offset)
+            skipped: unrecoverable bad message (commit offset)
+            retry: transient failure (do not commit)
+        """
+        try:
+            data = json.loads(message_value)
+        except json.JSONDecodeError as e:
+            logger.error(
+                "invalid_json", extra={"event": "invalid_json", "error": str(e)}
+            )
+            self.errors_count += 1
+            return "skipped"
+
+        if not isinstance(data, dict) or not data.get("url"):
+            logger.error(
+                "invalid_payload",
+                extra={"event": "invalid_payload", "preview": message_value[:100]},
+            )
+            self.errors_count += 1
+            return "skipped"
+
+        try:
             document = {
                 **data,
                 "processed_at": datetime.now(timezone.utc),
                 "source": "quora_scraper",
             }
 
-            # Store in MongoDB with upsert based on hash (if present) or URL
             filter_key = (
                 {"hash": data["hash"]} if "hash" in data else {"url": data.get("url")}
             )
@@ -160,7 +188,7 @@ class KafkaMongoSubscriber:
                     },
                 )
             else:
-                logger.info(
+                logger.debug(
                     "mongo_upsert_updated",
                     extra={
                         "event": "mongo_upsert",
@@ -171,21 +199,14 @@ class KafkaMongoSubscriber:
                 )
 
             self.messages_stored += 1
-            return True
-
-        except json.JSONDecodeError as e:
-            logger.error(
-                "invalid_json", extra={"event": "invalid_json", "error": str(e)}
-            )
-            self.errors_count += 1
-            return False
+            return "stored"
 
         except PyMongoError as e:
             logger.error(
                 "mongodb_error", extra={"event": "mongodb_error", "error": str(e)}
             )
             self.errors_count += 1
-            return False
+            return "retry"
 
         except Exception as e:
             logger.error(
@@ -193,7 +214,7 @@ class KafkaMongoSubscriber:
                 extra={"event": "unexpected_error", "error": str(e)},
             )
             self.errors_count += 1
-            return False
+            return "retry"
 
     def consume_messages(self):
         """Main consumer loop"""
@@ -201,7 +222,6 @@ class KafkaMongoSubscriber:
 
         try:
             while not self.shutdown:
-                # Poll for messages
                 msg = self.consumer.poll(timeout=1.0)
 
                 if msg is None:
@@ -225,7 +245,6 @@ class KafkaMongoSubscriber:
                         self.errors_count += 1
                     continue
 
-                # Process message
                 self.messages_processed += 1
                 message_value = msg.value().decode("utf-8")
 
@@ -237,9 +256,10 @@ class KafkaMongoSubscriber:
                     },
                 )
 
-                self.process_message(message_value)
+                outcome = self.process_message(message_value)
+                if outcome in ("stored", "skipped"):
+                    self.consumer.commit(message=msg, asynchronous=False)
 
-                # Log progress every 10 messages
                 if self.messages_processed % 10 == 0:
                     self.print_stats()
 
@@ -291,11 +311,8 @@ class KafkaMongoSubscriber:
         try:
             logger.info("subscriber_start", extra={"event": "subscriber_start"})
 
-            # Setup connections
             self.setup_kafka_consumer()
             self.setup_mongodb_connection()
-
-            # Start consuming
             self.consume_messages()
 
         except Exception as e:
@@ -309,18 +326,21 @@ class KafkaMongoSubscriber:
 
 
 def signal_handler(signum, frame):
-    """Handle shutdown signals"""
-    logger.info(f"Received signal {signum}, shutting down...")
-    sys.exit(0)
+    """Request graceful shutdown on SIGINT/SIGTERM."""
+    logger.info("Received signal %s, shutting down...", signum)
+    if _active_subscriber is not None:
+        _active_subscriber.shutdown = True
+    else:
+        sys.exit(0)
 
 
 def main():
     """Main function"""
-    # Setup signal handlers
+    global _active_subscriber
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # Check required environment variables
     required_env_vars = ["MONGODB_URI"]
     missing_vars = [var for var in required_env_vars if not os.environ.get(var)]
 
@@ -331,6 +351,7 @@ def main():
 
     try:
         subscriber = KafkaMongoSubscriber()
+        _active_subscriber = subscriber
         return subscriber.run()
 
     except KeyboardInterrupt:

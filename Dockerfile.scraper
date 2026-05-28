@@ -21,6 +21,7 @@ COPY quora_scraper.py ./
 COPY quora_selectors.py ./
 COPY senders.py ./
 COPY logging_setup.py ./
+COPY healthcheck.py ./
 
 # Environment defaults
 ENV CHROME_BINARY=/usr/bin/chromium \
@@ -31,9 +32,9 @@ RUN useradd --create-home --shell /bin/bash app \
     && chown -R app:app /app
 USER app
 
-# Healthcheck: quick Python exit
+# Healthcheck: verify Selenium and Chromium are available
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-  CMD uv run python -c "import sys; sys.exit(0)"
+  CMD ["uv", "run", "healthcheck.py", "scraper"]
 
 # Entrypoint: run scraper
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]

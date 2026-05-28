@@ -57,10 +57,10 @@ profile.html
 scraper_output.jsonl
 test.txt
 aula01.md
-main.py
 qa_files/
 tests/
 docs/
+scripts/
 João Eurico de Aguiar Lima - Quora_files/
 
 # Container files
@@ -68,7 +68,6 @@ Dockerfile
 .containerignore
 podman_subscriber.sh
 start_subscriber.sh
-test_subscriber.py
 
 # Environment files (will be mounted separately)
 .env

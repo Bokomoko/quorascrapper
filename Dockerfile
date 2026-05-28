@@ -17,15 +17,16 @@ COPY kafka_subscriber.py ./
 COPY quora_selectors.py ./
 COPY senders.py ./
 COPY logging_setup.py ./
+COPY healthcheck.py ./
 
 # Create non-root user and set permissions
 RUN useradd --create-home --shell /bin/bash app \
     && chown -R app:app /app
 USER app
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD uv run python -c "import sys; sys.exit(0)"
+# Health check: verify Kafka broker and MongoDB connectivity
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD ["uv", "run", "healthcheck.py", "subscriber"]
 
 # Default command
 CMD ["uv", "run", "kafka_subscriber.py"]

@@ -202,22 +202,7 @@ class QuoraScraper:
             for a in anchors:
                 if self.processed >= limit:
                     break
-                try:
-                    href = a.get_attribute("href")
-                    if not href:
-                        continue
-                    href = urljoin(self.driver.current_url, href)
-                    if "/answer/" not in href:
-                        continue
-                    if href in self.seen_links:
-                        continue
-                    self.seen_links.add(href)
-                    self.logger.debug("Found answer URL: %s", href)
-                    self._send_url(href)
-                    self.processed += 1
-                except Exception as ex:
-                    self.logger.debug("Anchor processing error (scroll loop): %s", ex)
-                    continue
+                self._process_anchor(a, self.driver.current_url)
         if self.processed >= (self.answer_limit or self.max_results):
             self.logger.info(
                 "Reached answer limit (%s) during scroll",
@@ -351,23 +336,7 @@ class QuoraScraper:
                 for a in anchors:
                     if self.processed >= (self.answer_limit or self.max_results):
                         break
-                    try:
-                        href = a.get_attribute("href")
-                        if not href:
-                            continue
-                        # Normalize to absolute URL (handles potential relative)
-                        href = urljoin(url, href)
-                        if "/answer/" not in href:
-                            continue
-                        if href in self.seen_links:
-                            continue
-                        self.seen_links.add(href)
-                        self.logger.debug("Found answer URL: %s", href)
-                        self._send_url(href)
-                        self.processed += 1
-                    except Exception as ex:
-                        self.logger.debug(f"Anchor processing error: {ex}")
-                        continue
+                    self._process_anchor(a, url)
             if self.processed < (self.answer_limit or self.max_results):
                 # Fallback to block-based parsing if needed
                 found_block = False
@@ -385,8 +354,7 @@ class QuoraScraper:
                     except Exception:
                         continue
                 if not found_block:
-                    self.logger.warning("No answer blocks detected before scrolling.")
-                self.scroll_to_bottom()
+                    self.logger.warning("No answer blocks detected; using block fallback.")
                 blocks = []
                 seen_ids = set()
                 for xpath in ANSWER_BLOCK_XPATHS:
@@ -529,15 +497,45 @@ class QuoraScraper:
                     raise
                 time.sleep(0.2)
 
+    def _process_anchor(self, anchor, base_url: str) -> bool:
+        """Extract href from anchor and send if new. Returns True when sent."""
+
+        def read_href():
+            href = anchor.get_attribute("href")
+            if not href:
+                return None
+            href = urljoin(base_url, href)
+            if "/answer/" not in href:
+                return None
+            return href
+
+        try:
+            href = self._retry(read_href)
+        except StaleElementReferenceException:
+            self.logger.debug("Stale anchor during href read")
+            return False
+        except Exception as ex:
+            self.logger.debug("Anchor processing error: %s", ex)
+            return False
+
+        if not href or href in self.seen_links:
+            return False
+
+        self.seen_links.add(href)
+        self.logger.debug("Found answer URL: %s", href)
+        self._send_url(href)
+        self.processed += 1
+        return True
+
     def _send_url(self, url):
         try:
-            self.logger.info(
+            self.logger.debug(
                 "url_send",
                 extra={"event": "url_send", "url": url},
             )
             self.sender.send({"url": url})
             self.results.append(url)
-            self.logger.info(
+            self.logger.debug(
                 "url_sent",
                 extra={"event": "url_sent", "url": url},
             )

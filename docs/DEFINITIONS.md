@@ -16,9 +16,10 @@
 
 ## Scripts (pyproject)
 
-- run: execute the scraper (uv run)
-- test: run the test suite (uvx pytest -q)
-- build: build the project distribution (uv build)
+- `uv run quora_scraper.py` — run the scraper
+- `uv run kafka_subscriber.py` — run the Kafka→MongoDB subscriber
+- `uv run pytest -q` — run unit tests (`tests/` only; integration scripts in `scripts/`)
+- `uv build` — build the project distribution (if packaging is added later)
 
 ## Environment variables
 

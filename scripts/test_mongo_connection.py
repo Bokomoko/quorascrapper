@@ -34,7 +34,6 @@ def test_mongodb_connection():
 
     print("🧪 Testing MongoDB Atlas Connection")
     print("=" * 40)
-    print(f"MongoDB URI: {mongodb_uri}")
     print(f"Database: {database}")
     print()
 

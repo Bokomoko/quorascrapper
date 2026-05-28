@@ -91,8 +91,11 @@ SENDER=kafka MAX_RESULTS=10 uv run quora_scraper.py
 
 ```bash
 uv run quora_scraper.py
-uvx pytest -q
+uv run kafka_subscriber.py
+uv run pytest -q
 ```
+
+Manual integration scripts live under `scripts/` (Kafka producer test, Mongo connection test, etc.).
 
 ## Kafka Consumer - MongoDB Integration
 
@@ -126,7 +129,7 @@ The project includes a Kafka consumer (`kafka_subscriber.py`) that reads scraped
 ### Consumer Features
 
 - **Automatic deduplication**: Uses URL hash to prevent duplicate entries
-- **Error handling**: Robust error handling with retry logic
+- **Error handling**: Failed Mongo writes are retried; invalid messages are skipped; offsets commit after successful storage
 - **Statistics**: Real-time processing statistics
 - **Graceful shutdown**: Handles interruption signals properly
 
