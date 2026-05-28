@@ -4,6 +4,10 @@ import os
 import sys
 from typing import Any, Optional
 
+from logging_setup import init_logging
+
+_sender_logger = init_logging("sender")
+
 
 class BaseSender:
     def send(self, obj: dict[str, Any]) -> None:
@@ -37,7 +41,11 @@ class StdoutSender(BaseSender):
         self._stream = stream or sys.stdout
 
     def _send(self, obj: dict[str, Any]) -> None:
-        self._stream.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        line = json.dumps(obj, ensure_ascii=False)
+        _sender_logger.info(
+            "stdout_send", extra={"event": "stdout_send", "len": len(line)}
+        )
+        self._stream.write(line + "\n")
         self._stream.flush()
 
 
@@ -51,7 +59,7 @@ class KafkaSender(BaseSender):
             raise RuntimeError("confluent-kafka is required for KafkaSender") from e
 
         self.bootstrap = bootstrap or os.environ.get(
-            "KAFKA_BOOTSTRAP", "192.168.1.116:19092"
+            "KAFKA_BOOTSTRAP", "bokomint.local:19092"
         )
         self.topic = topic or os.environ.get("KAFKA_TOPIC", "quora-answers")
         self._producer = Producer({"bootstrap.servers": self.bootstrap})
@@ -62,9 +70,20 @@ class KafkaSender(BaseSender):
 
         def delivery_report(err, msg):  # pragma: no cover (observability only)
             if err is not None:
-                sys.stderr.write(f"[KAFKA][FAIL] {str(url)[:100]} | Reason: {err}\n")
+                _sender_logger.error(
+                    "kafka_delivery_failed",
+                    extra={
+                        "event": "kafka_delivery_failed",
+                        "url": str(url)[:100],
+                        "error": str(err),
+                    },
+                )
             # On success, stay silent to keep output minimal
 
+        _sender_logger.info(
+            "kafka_produce",
+            extra={"event": "kafka_produce", "topic": self.topic, "size": len(payload)},
+        )
         self._producer.produce(self.topic, value=payload, callback=delivery_report)
         # Let the producer poll to drive callbacks
         self._producer.poll(0)
@@ -81,5 +100,6 @@ class KafkaSender(BaseSender):
             # Drive delivery callbacks briefly then flush with a generous timeout
             self._producer.poll(0.5)
             self._producer.flush(15)
+            _sender_logger.info("kafka_close", extra={"event": "kafka_close"})
         except Exception:
             pass

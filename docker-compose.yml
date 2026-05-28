@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  kafka-subscriber:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quora-kafka-subscriber
+    env_file:
+      - .env.container
+    restart: unless-stopped
+    networks:
+      - host
+    depends_on: []
+    healthcheck:
+      test: ["CMD", "uv", "run", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  host:
+    external: true

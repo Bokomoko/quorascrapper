@@ -1,4 +1,3 @@
-import logging
 import os
 import re
 import time
@@ -32,6 +31,7 @@ except Exception:  # pragma: no cover
 
     By = EC = WebDriverWait = _Dummy()
 
+from logging_setup import init_logging
 from quora_selectors import (
     ANSWER_ANCHOR_XPATH,
     ANSWER_BLOCK_XPATHS,
@@ -74,13 +74,8 @@ class QuoraScraper:
     def __init__(self, sender=None):
         # Initialize Chrome WebDriver with error handling & optional fallback
         self.driver = None
-        # Logging setup (default to WARNING to minimize noise)
-        log_level = os.environ.get("LOG_LEVEL", "WARNING").upper()
-        logging.basicConfig(
-            level=getattr(logging, log_level, logging.INFO),
-            format="%(asctime)s [%(levelname)s] %(message)s",
-        )
-        self.logger = logging.getLogger("QuoraScraper")
+        # Unified logging
+        self.logger = init_logging("scraper")
         if webdriver is None:
             # Allow constructing in test environments; actual run will fail early
             self.logger.warning(
@@ -153,7 +148,7 @@ class QuoraScraper:
         self.no_growth_threshold = 5
         self.scroll_pause = float(os.environ.get("SCROLL_PAUSE", "1.5"))
         # Legacy Kafka settings retained for compatibility, but sending now goes through sender
-        self.kafka_bootstrap = os.environ.get("KAFKA_BOOTSTRAP", "192.168.1.116:19092")
+        self.kafka_bootstrap = os.environ.get("KAFKA_BOOTSTRAP", "bokomint.local:19092")
         self.kafka_topic = os.environ.get("KAFKA_TOPIC", "quora-answers")
         self.kafka_healthcheck_topic = os.environ.get(
             "KAFKA_HEALTHCHECK_TOPIC", "healthcheck"
@@ -536,12 +531,21 @@ class QuoraScraper:
 
     def _send_url(self, url):
         try:
-            self.logger.debug("Sending to sender: %s", url)
+            self.logger.info(
+                "url_send",
+                extra={"event": "url_send", "url": url},
+            )
             self.sender.send({"url": url})
             self.results.append(url)
-            self.logger.debug("Sent successfully: %s", url)
+            self.logger.info(
+                "url_sent",
+                extra={"event": "url_sent", "url": url},
+            )
         except Exception as e:
-            self.logger.error("Sender failed for URL %s: %s", url, e)
+            self.logger.error(
+                "url_send_error",
+                extra={"event": "url_send_error", "url": url, "error": str(e)},
+            )
 
     def kafka_healthcheck(self, timeout_sec: float = 5.0) -> bool:
         """Try a minimal produce+flush to validate broker connectivity.

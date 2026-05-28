@@ -1,0 +1,76 @@
+# Container ignore file - exclude unnecessary files from build context
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.virtualenv/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Project specific
+profile.html
+scraper_output.jsonl
+test.txt
+aula01.md
+main.py
+qa_files/
+tests/
+docs/
+João Eurico de Aguiar Lima - Quora_files/
+
+# Container files
+Dockerfile
+.containerignore
+podman_subscriber.sh
+start_subscriber.sh
+test_subscriber.py
+
+# Environment files (will be mounted separately)
+.env
+.env.example
+.env.container
