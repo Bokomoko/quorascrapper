@@ -1,6 +1,15 @@
-version: '3.8'
-
 services:
+  preflight:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env.container
+      - .env.scraper
+    network_mode: host
+    command: ["uv", "run", "quora-preflight", "--mode", "all"]
+    restart: "no"
+
   kafka-subscriber:
     build:
       context: .
@@ -9,21 +18,33 @@ services:
     env_file:
       - .env.container
     restart: unless-stopped
-    networks:
-      - host
-    depends_on: []
+    network_mode: host
+    depends_on:
+      preflight:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "uv", "run", "healthcheck.py", "subscriber"]
+      test: ["CMD", "uv", "run", "quora-healthcheck", "subscriber"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
     logging:
-      driver: "json-file"
+      driver: json-file
       options:
-        max-size: "10m"
+        max-size: 10m
         max-file: "3"
 
-networks:
-  host:
-    external: true
+  quora-scraper:
+    build:
+      context: .
+      dockerfile: Dockerfile.scraper
+    env_file:
+      - .env.scraper
+    network_mode: host
+    profiles:
+      - scraper
+    depends_on:
+      preflight:
+        condition: service_completed_successfully
+    command: ["uv", "run", "qsbk", "--sender", "kafka"]
+    restart: "no"

@@ -1,7 +1,7 @@
 [project]
 name = "quorascrapper"
-version = "0.1.0"
-description = "Quora profile Q&A scraper using Selenium"
+version = "0.2.0"
+description = "Quora profile answer URL scraper (qsbk) with Kafka and MongoDB pipeline"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -12,7 +12,43 @@ dependencies = [
     "python-json-logger>=2.0.7",
 ]
 
+[project.scripts]
+qsbk = "quorascrapper.scraper.cli:main"
+quora-scraper = "quorascrapper.scraper.cli:main"
+quora-subscriber = "quorascrapper.subscriber.cli:main"
+quora-preflight = "quorascrapper.ops.preflight:main"
+quora-mongo-check = "quorascrapper.ops.mongo_check:main"
+quora-healthcheck = "quorascrapper.ops.healthcheck:main"
+
+[project.urls]
+Repository = "https://github.com/bokomoko/quorascrapper"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "ruff>=0.8.0",
+    "mongomock>=4.2.0",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quorascrapper"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/pyproject.toml",
+    "/README.md",
+    "/uv.lock",
+    "/.env.example",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

@@ -23,4 +23,5 @@ qa_files/
 !.env.example
 *.jsonl
 profile.html
+test.txt
 logs/

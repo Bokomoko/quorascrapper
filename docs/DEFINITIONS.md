@@ -2,29 +2,38 @@
 
 - Language: English only. All code, comments, documentation, commit messages, and identifiers must be written in English.
 - Platform Manager: uv — manages Python, virtual environments, dependency resolution, scripts, and build tooling.
-- Python Runtime: Python 3.13 (provisioned by uv; no pre-install of Python or pip required).
-- Core Libraries:
-  - Selenium (>= 4.30.0)
-  - confluent-kafka (>= 2.3.0)
+- Python Runtime: Python 3.13 (provisioned by uv).
+- Package: `quorascrapper` (installable via hatchling, `src/` layout).
+
+## Core Libraries
+
+- Selenium (>= 4.30.0)
+- confluent-kafka (>= 2.3.0)
+- pymongo (>= 4.15.3)
+
+## CLI entry points
+
+- `uv run quora-scraper` — scrape answer URLs
+- `uv run quora-subscriber` — Kafka → MongoDB consumer
+- `uv run quora-preflight` — infrastructure pre-flight checks
+- `uv run quora-healthcheck` — container liveness (subscriber | scraper)
+- `uv run pytest -q` — unit tests (no live Kafka/Mongo/Chrome)
 
 ## Conventions
 
-- Use uv for all developer workflows: create venvs, install dependencies, run scripts, and build packages.
+- Use uv for all developer workflows.
 - Prefer XPath selectors with semantic anchors; avoid brittle auto-generated class names.
-- Log with environment-driven levels (LOG_LEVEL) and keep user-facing output concise.
-- No local persistence: all answer URLs are streamed to Kafka.
+- Configuration via `quorascrapper.config.Settings` — no hardcoded broker hostnames in library code.
+- Run `quora-preflight` before subscriber/scraper starts (local or container).
+- No local persistence for scraped URLs; data flows to stdout or Kafka.
 
-## Scripts (pyproject)
+## Environment files
 
-- `uv run quora_scraper.py` — run the scraper
-- `uv run kafka_subscriber.py` — run the Kafka→MongoDB subscriber
-- `uv run pytest -q` — run unit tests (`tests/` only; integration scripts in `scripts/`)
-- `uv build` — build the project distribution (if packaging is added later)
-
-## Environment variables
-
-- KAFKA_HEALTHCHECK_TOPIC: Kafka topic for health checks (default: healthcheck)
+- `.env.container` — subscriber (Kafka + MongoDB Atlas)
+- `.env.scraper` — scraper (profile URL, sender, Kafka)
+- `.env.example` — documented template only (safe to commit)
 
 ## Notes
 
-- Ensure Chrome is installed locally for Selenium; headless mode is used by default.
+- Kafka broker is external (LAN); compose uses `network_mode: host`.
+- Headless Quora may hit a login wall; preflight warns via `quora_reachability` check.

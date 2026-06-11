@@ -1,6 +1,5 @@
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 
-# Install system dependencies for headless Chromium + Selenium
 RUN apt-get update && apt-get install -y \
     chromium \
     chromium-driver \
@@ -12,30 +11,19 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy dependency manifests and install via uv (no pip)
 COPY pyproject.toml uv.lock ./
+COPY src ./src
 RUN uv sync --frozen --no-cache
 
-# Copy application code
-COPY quora_scraper.py ./
-COPY quora_selectors.py ./
-COPY senders.py ./
-COPY logging_setup.py ./
-COPY healthcheck.py ./
-
-# Environment defaults
 ENV CHROME_BINARY=/usr/bin/chromium \
     LOG_LEVEL=INFO
 
-# Create unprivileged user
 RUN useradd --create-home --shell /bin/bash app \
     && chown -R app:app /app
 USER app
 
-# Healthcheck: verify Selenium and Chromium are available
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-  CMD ["uv", "run", "healthcheck.py", "scraper"]
+  CMD ["uv", "run", "quora-healthcheck", "scraper"]
 
-# Entrypoint: run scraper
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
-CMD ["uv", "run", "quora_scraper.py"]
+CMD ["uv", "run", "qsbk"]

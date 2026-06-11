@@ -1,8 +1,10 @@
 # Critical Workspace Review
 
-**Date:** 2026-05-27  
+**Date:** 2026-05-27 (updated after package refactor)  
 **Scope:** Full repository — scraper, Kafka pipeline, subscriber, containers, tests, documentation  
 **Reviewer:** Automated workspace review (Cursor agent)
+
+> **Refactor status (2026-05-27):** Code now lives in `src/quorascrapper/` with CLI entry points (`quora-scraper`, `quora-subscriber`, `quora-preflight`). Subscriber uses manual commit-after-write and graceful shutdown. Unified preflight replaces ad-hoc `scripts/test_*.py` for startup validation. See README for current workflows; items below marked fixed in Phase 0–2 + package refactor may be stale.
 
 ## Prior reviews
 
@@ -214,4 +216,5 @@ For tactical backlog items, see **`docs/ISSUES.md`**. For conventions and env va
 
 | Date | Change |
 |------|--------|
+| 2026-06-11 | **Refactor landed:** monorepo package (`src/quorascrapper/`), `qsbk` uv-tool CLI, startup/scrape gates, expanded `--dry-run`, subscriber/scraper split, CI (ruff + pytest). macOS Selenium now uses Chrome for Testing (avoids chromedriver → system Chrome SIGABRT). Mongo preflight fixed for Atlas `mongodb+srv` SRV DNS. Kafka + Mongo + Selenium dry-run **PASS**. |
 | 2026-05-27 | Phase 0–2 hardening completed (see git history) |

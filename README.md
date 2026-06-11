@@ -1,208 +1,169 @@
 # Quora Profile Scraper
 
-Scrape Quora profile answer URLs and stream them to Kafka (or stdout).
+Scrape Quora profile answer URLs and stream them to Kafka (or stdout). A Kafka subscriber upserts each message into MongoDB Atlas.
 
-## Setup (uv-only)
+## Architecture
 
-Install uv (one-time):
+```
+Quora profile → quora-scraper → Kafka (LAN) → quora-subscriber → MongoDB Atlas
+```
+
+Message contract (unchanged): `{"url": "...", "hash": "<blake2s-16>"}` per answer URL.
+
+## Setup
+
+### Install `qsbk` anywhere (uv tool / uvx)
+
+```bash
+# One-time install — adds qsbk to your PATH (~/.local/bin)
+uv tool install /path/to/quorascrapper
+
+# Or from git (after push)
+uv tool install git+https://github.com/bokomoko/quorascrapper.git
+
+# Run without installing (ephemeral)
+uvx --from /path/to/quorascrapper qsbk --version
+uvx --from /path/to/quorascrapper qsbk --dry-run --skip-preflight
+```
+
+Then use from any directory:
+
+```bash
+qsbk --version
+qsbk --dry-run --skip-preflight
+qsbk --sender stdout --skip-preflight "https://pt.quora.com/profile/<USER>/answers"
+```
+
+**Linux host:** install Chrome or Chromium (`google-chrome-stable`, `chromium`) — `qsbk` auto-detects it.  
+**Linux container:** uses `/usr/bin/chromium` + bundled chromedriver (see `Dockerfile.scraper`).  
+**macOS:** uses Google Chrome + Selenium Manager for chromedriver.
+
+### Development (this repo)
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
-# then restart your shell or source your profile if needed
+uv sync --group dev
+uv run qsbk --version
 ```
 
-`uv run` will create the environment and install dependencies on first use.
+## Gates (automatic)
 
-## Running the Scraper
+`quora-scraper` and `quora-subscriber` **run preflight automatically** before starting. If checks fail, they exit without scraping or consuming.
 
-Run with a profile URL:
+| Exit code | Meaning |
+|-----------|---------|
+| `1` | Preflight failed (Kafka, Mongo, Chrome, etc.) |
+| `2` | Quora login wall detected |
+| `3` | Scrape finished with zero URLs |
+
+Skip only for local dev/tests:
 
 ```bash
-uv run quora_scraper.py "https://pt.quora.com/profile/<USER>/answers"
+uv run quora-scraper --skip-preflight --sender stdout
+SKIP_PREFLIGHT=1 uv run quora-subscriber
 ```
 
-Or via env var if no CLI arg is passed:
+Manual preflight (same checks):
 
 ```bash
-PROFILE_URL="https://pt.quora.com/profile/<USER>/answers" uv run quora_scraper.py
+uv run quora-preflight --mode all
+uv run quora-preflight --mode subscriber
+uv run quora-preflight --mode scraper
 ```
 
-Choose the output sender:
+Copy and configure env files (never commit these):
 
 ```bash
-# stdout (default)
-uv run quora_scraper.py --sender stdout
-
-# Kafka
-SENDER=kafka uv run quora_scraper.py --sender kafka
+cp .env.example .env.container   # subscriber: KAFKA_BOOTSTRAP, MONGODB_URI
+cp .env.example .env.scraper     # scraper: PROFILE_URL, SENDER, KAFKA_BOOTSTRAP
 ```
 
-## Output
+`KAFKA_BOOTSTRAP` and `MONGODB_URI` have no in-code defaults — set them in env files.
 
-Emits one JSON line per answer URL to the selected sender:
+**Browser:** the scraper auto-detects OS/runtime and picks the right Chrome binary and flags:
 
-- stdout: JSONL to stdout
-- Kafka: JSONL messages to the configured topic
+| Runtime | Browser | ChromeDriver |
+|---------|---------|--------------|
+| macOS | Google Chrome | Selenium Manager (auto-download) |
+| Linux container | `/usr/bin/chromium` | system `chromedriver` |
+| Linux host | chromium/google-chrome | PATH or Selenium Manager |
 
-## Kafka Configuration
+Override only when needed: `CHROME_BINARY`, `CHROMEDRIVER_PATH`, `USE_PATH_CHROMEDRIVER=1`.
 
-Environment variables:
+## CLI entry points
 
-- `KAFKA_BOOTSTRAP` (default: `bokomint.local:19092`)
-- `KAFKA_TOPIC` (default: `quora-answers`)
-- `KAFKA_HEALTHCHECK_TOPIC` (default: `healthcheck`)
-- `KAFKA_HEALTHCHECK`: set `0` to skip startup healthcheck
+| Command | Role |
+|---------|------|
+| `uv run qsbk` | Scrape answer URLs (primary CLI) |
+| `uv run quora-scraper` | Alias for `qsbk` |
+| `uv run quora-subscriber` | Consume Kafka → MongoDB |
+| `uv run quora-preflight` | Infrastructure checks |
+| `uv run quora-healthcheck` | Container liveness probes |
 
-Example:
+Legacy root shims (`quora_scraper.py`, `kafka_subscriber.py`) delegate to the package.
+
+### Scraper (`qsbk`)
 
 ```bash
-KAFKA_BOOTSTRAP=bokomint.local:19092 KAFKA_TOPIC=quora-answers uv run quora_scraper.py --sender kafka
+uv run qsbk --version
+uv run qsbk --dry-run              # full infra check (Kafka, Mongo, browser, Quora)
+uv run qsbk --dry-run --sender kafka   # strict: Kafka/Mongo failures = FAIL
+uv run qsbk "https://pt.quora.com/profile/<USER>/answers"
+MAX_RESULTS=10 uv run qsbk --sender stdout --skip-preflight
+SENDER=kafka uv run qsbk --sender kafka
 ```
 
-### .env support
-
-Variables from a local `.env` are loaded automatically. For a LAN broker:
-
-```env
-KAFKA_BOOTSTRAP=bokomint.local:19092
-KAFKA_TOPIC=quora-answers
-```
-
-Then run:
+### Subscriber
 
 ```bash
-SENDER=kafka MAX_RESULTS=10 uv run quora_scraper.py
+uv run quora-subscriber
 ```
 
-## Other Environment Variables
+## Container deployment
 
-- `PROFILE_URL`: profile URL (if not passed via CLI)
-- `MAX_RESULTS`: cap on number of answers to send
-- `LOG_LEVEL`: logging level (default WARNING)
-- `SCROLL_PAUSE`: seconds to wait between scrolls (default 1.5)
-- `DRY_RUN`: `1` to skip Kafka produce (mostly for legacy; stdout sender is preferred)
-
-## Notes
-
-- No files are written; data flows to stdout or Kafka.
-- Ensure the Kafka broker is reachable from your machine.
-
-## Dev quick commands
+Uses host networking (required for LAN Kafka DNS).
 
 ```bash
-uv run quora_scraper.py
-uv run kafka_subscriber.py
+# Subscriber stack (preflight → subscriber)
+./podman_subscriber.sh up
+./podman_subscriber.sh logs
+
+# On-demand scraper
+./podman_scraper.sh run --sender kafka
+```
+
+Or with compose directly:
+
+```bash
+docker compose run --rm preflight
+docker compose up -d kafka-subscriber
+docker compose --profile scraper run --rm quora-scraper
+```
+
+## Configuration
+
+See [`.env.example`](.env.example). Key groups:
+
+- **Kafka:** `KAFKA_BOOTSTRAP`, `KAFKA_TOPIC`, `KAFKA_GROUP_ID`
+- **Mongo:** `MONGODB_URI`, `MONGODB_DATABASE`, `MONGODB_COLLECTION`
+- **Scraper:** `PROFILE_URL`, `MAX_RESULTS`, `SCROLL_PAUSE`, `SENDER`, `CHROME_BINARY`
+
+## Development
+
+```bash
 uv run pytest -q
+uv run ruff check src tests
 ```
 
-Manual integration scripts live under `scripts/` (Kafka producer test, Mongo connection test, etc.).
+Integration helpers remain under `scripts/` for manual debugging.
 
-## Kafka Consumer - MongoDB Integration
+## Package layout
 
-The project includes a Kafka consumer (`kafka_subscriber.py`) that reads scraped URLs from Kafka and stores them in MongoDB Atlas.
-
-### Setup MongoDB Subscriber
-
-1. **Configure MongoDB Atlas**:
-   - Create a MongoDB Atlas cluster
-   - Get your connection string from Atlas dashboard
-   - Set the `MONGODB_URI` environment variable
-
-2. **Environment Variables**:
-   ```bash
-   # Copy the example and configure
-   cp .env.example .env
-
-   # Edit .env with your MongoDB Atlas connection string
-   MONGODB_URI=mongodb+srv://username:password@cluster.mongodb.net/?retryWrites=true&w=majority
-   ```
-
-3. **Run the subscriber**:
-   ```bash
-   # Install additional dependencies
-   uv add pymongo
-
-   # Run the Kafka subscriber
-   uv run kafka_subscriber.py
-   ```
-
-### Consumer Features
-
-- **Automatic deduplication**: Uses URL hash to prevent duplicate entries
-- **Error handling**: Failed Mongo writes are retried; invalid messages are skipped; offsets commit after successful storage
-- **Statistics**: Real-time processing statistics
-- **Graceful shutdown**: Handles interruption signals properly
-
-### Usage Example
-
-```bash
-# Terminal 1: Start the subscriber
-MONGODB_URI="your-connection-string" uv run kafka_subscriber.py
-
-# Terminal 2: Run the scraper
-SENDER=kafka uv run quora_scraper.py "https://pt.quora.com/profile/USER/answers"
 ```
-
-The subscriber will automatically:
-1. Connect to Kafka and MongoDB Atlas
-2. Consume messages from the `quora-answers` topic
-3. Store URLs in MongoDB with metadata (processed_at, source)
-4. Handle duplicates using the hash field
-5. Log processing statistics
-
-## Container Deployment (Podman)
-
-For production deployment, the subscriber can run in a Podman container:
-
-### Quick Start with Containers
-
-1. **Configure environment**:
-   ```bash
-   # Copy and edit container environment
-   cp .env.example .env.container
-   # Edit .env.container with your MongoDB Atlas connection string
-   ```
-
-2. **Build and run**:
-   ```bash
-   # Build the container image
-   ./podman_subscriber.sh build
-
-   # Start the subscriber container
-   ./podman_subscriber.sh start
-   ```
-
-3. **Monitor**:
-   ```bash
-   # View logs in real-time
-   ./podman_subscriber.sh logs
-
-   # Check status
-   ./podman_subscriber.sh status
-   ```
-
-### Container Management Commands
-
-```bash
-./podman_subscriber.sh build     # Build container image
-./podman_subscriber.sh start     # Start subscriber container
-./podman_subscriber.sh stop      # Stop container
-./podman_subscriber.sh restart   # Restart container
-./podman_subscriber.sh logs      # Follow logs
-./podman_subscriber.sh status    # Show status
-./podman_subscriber.sh shell     # Interactive shell
-./podman_subscriber.sh rebuild   # Rebuild and restart
-```
-
-### Using Docker Compose (Alternative)
-
-```bash
-# Start with docker-compose
-podman-compose -f docker-compose.yml up -d
-
-# View logs
-podman-compose -f docker-compose.yml logs -f
-
-# Stop
-podman-compose -f docker-compose.yml down
+src/quorascrapper/
+  config.py           # Settings from env
+  messaging/          # stdout + Kafka senders
+  scraper/            # browser, scroll, extract, service
+  subscriber/         # consumer, storage
+  ops/                # preflight, healthcheck, discover_mongo
 ```
