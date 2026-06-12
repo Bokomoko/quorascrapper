@@ -4,9 +4,12 @@
   window.__qsbkScrapeLoaded = true;
 
   var SCROLL_PAUSE_MS = 1500;
-  var STAGNANT_LIMIT = 6;
+  var FAST_SCROLL_PAUSE_MS = 450;
+  var STAGNANT_LIMIT = 10;
+  var RESUME_STAGNANT_LIMIT = 24;
   var RECOVERY_BURST = 3;
-  var MAX_RECOVERY_ROUNDS = 4;
+  var MAX_RECOVERY_ROUNDS = 6;
+  var PRUNE_ENABLED = false;
   var running = false;
 
   function sleep(ms) {
@@ -159,6 +162,168 @@
     });
   }
 
+  function answerKeyFromUrl(url) {
+    if (!url) return null;
+    var m = String(url).match(/\/answer\/([^/?#]+)/i);
+    return m ? m[1].toLowerCase() : null;
+  }
+
+  function canonicalAnswerKey(url) {
+    var normalized = normalizeAnswerUrl(url, url);
+    if (!normalized) return null;
+    try {
+      var u = new URL(normalized);
+      return u.origin.toLowerCase() + u.pathname.replace(/\/$/, "");
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function buildKnownLookup(payload) {
+    var byUrl = {};
+    var byKey = {};
+    var urls = (payload && payload.urls) || [];
+    var keys = (payload && payload.keys) || [];
+    urls.forEach(function (u) {
+      var c = canonicalAnswerKey(u);
+      if (c) byUrl[c] = true;
+      var k = answerKeyFromUrl(u);
+      if (k) byKey[k] = true;
+    });
+    keys.forEach(function (k) {
+      byKey[String(k).toLowerCase()] = true;
+    });
+    return { byUrl: byUrl, byKey: byKey };
+  }
+
+  function isKnownAnswer(url, known) {
+    if (!known || !url) return false;
+    var key = answerKeyFromUrl(url);
+    if (key && known.byKey[key]) return true;
+    var curl = canonicalAnswerKey(url);
+    return !!(curl && known.byUrl[curl]);
+  }
+
+  function loadKnownLookup() {
+    return new Promise(function (resolve) {
+      if (!window.qsbkServeConfig) {
+        resolve(buildKnownLookup({}));
+        return;
+      }
+      window.qsbkServeConfig.getServeBase(function (base) {
+        var knownUrl = window.qsbkServeConfig.serveUrls(base).known;
+        fetch(knownUrl, { cache: "no-store" })
+          .then(function (response) {
+            return response.ok ? response.json() : null;
+          })
+          .then(function (payload) {
+            if (payload) {
+              resolve(buildKnownLookup(payload));
+              return;
+            }
+            chrome.storage.local.get(["knownAnswerPayload"], function (data) {
+              resolve(buildKnownLookup((data && data.knownAnswerPayload) || {}));
+            });
+          })
+          .catch(function () {
+            chrome.storage.local.get(["knownAnswerPayload"], function (data) {
+              resolve(buildKnownLookup((data && data.knownAnswerPayload) || {}));
+            });
+          });
+      });
+    });
+  }
+
+  function removableBlockRoot(block) {
+    if (!block) return null;
+    return (
+      block.closest("article") ||
+      block.closest('[class*="Answer"]') ||
+      block.closest('[class*="answer"]') ||
+      block
+    );
+  }
+
+  function pruneDomAbove(records, known) {
+    if (!PRUNE_ENABLED) return 0;
+    var cutoff = -window.innerHeight * 1.5;
+    var removed = 0;
+    var seen = typeof WeakSet !== "undefined" ? new WeakSet() : null;
+    collectAnswerBlocks().forEach(function (block) {
+      var rect = block.getBoundingClientRect();
+      if (rect.bottom > cutoff) return;
+      var answerUrl = bestAnswerUrlFromBlock(block, location.href);
+      if (!answerUrl) return;
+      if (!records[answerUrl] && !isKnownAnswer(answerUrl, known)) return;
+      var root = removableBlockRoot(block);
+      if (!root || !root.parentElement) return;
+      if (seen) {
+        if (seen.has(root)) return;
+        seen.add(root);
+      }
+      root.remove();
+      removed += 1;
+    });
+    return removed;
+  }
+
+  function pageHasResumeMarker(resumeAfterKey) {
+    if (!resumeAfterKey) return true;
+    var key = resumeAfterKey.toLowerCase();
+    var anchors = document.querySelectorAll('a[href*="/answer/"]');
+    for (var i = 0; i < anchors.length; i++) {
+      var href = anchors[i].getAttribute("href") || "";
+      var answerKey = answerKeyFromUrl(href);
+      if (answerKey && answerKey === key) return true;
+    }
+    return false;
+  }
+
+  function countSkippedOnly(records, known, seenSkippedKeys) {
+    var skippedKnown = 0;
+    collectAnswerBlocks().forEach(function (block) {
+      var answerUrl = bestAnswerUrlFromBlock(block, location.href);
+      if (!answerUrl || records[answerUrl]) return;
+      var skipKey = answerKeyFromUrl(answerUrl);
+      if (!skipKey || seenSkippedKeys[skipKey]) return;
+      if (!isKnownAnswer(answerUrl, known)) return;
+      seenSkippedKeys[skipKey] = true;
+      skippedKnown += 1;
+    });
+    return skippedKnown;
+  }
+
+  function collectNewRecords(records, known, skipKnown, seenSkippedKeys) {
+    var added = 0;
+    var skippedKnown = 0;
+    var deepestUrl = null;
+    collectAnswerBlocks().forEach(function (block) {
+      var answerUrl = bestAnswerUrlFromBlock(block, location.href);
+      if (!answerUrl) return;
+      deepestUrl = answerUrl;
+      if (records[answerUrl]) return;
+      if (skipKnown && isKnownAnswer(answerUrl, known)) {
+        var skipKey = answerKeyFromUrl(answerUrl);
+        if (skipKey && !seenSkippedKeys[skipKey]) {
+          seenSkippedKeys[skipKey] = true;
+          skippedKnown += 1;
+        }
+        return;
+      }
+      var question = questionFromBlock(block);
+      records[answerUrl] = {
+        url: answerUrl,
+        answer_url: answerUrl,
+        question_title: question.title || "",
+        question_url: question.url || "",
+        answer_preview: answerPreviewFromBlock(block),
+        seen_at: new Date().toISOString(),
+      };
+      added += 1;
+    });
+    return { added: added, skippedKnown: skippedKnown, deepestUrl: deepestUrl };
+  }
+
   function pageMetrics() {
     return {
       scrollHeight: document.body.scrollHeight,
@@ -280,13 +445,371 @@
     );
   }
 
-  async function scrollAndCollect(maxResults) {
+  function recordsAsRows(records) {
+    return Object.keys(records)
+      .sort()
+      .map(function (k) {
+        return records[k];
+      });
+  }
+
+  /* ---------------------------------------------------------------------------
+   * GraphQL API collection (no scrolling).
+   *
+   * Quora's /answers tab is backed by a Relay persisted query
+   * (UserProfileAnswersMostRecent_RecentAnswers_Query) at
+   * POST /graphql/gql_para_POST. It uses an integer offset cursor: endCursor
+   * from each response feeds the next request's `after` until
+   * pageInfo.hasNextPage is false. The content script shares the page's
+   * cookies, so a same-origin fetch is authenticated automatically.
+   * ------------------------------------------------------------------------ */
+  var GQL_QUERY_NAME = "UserProfileAnswersMostRecent_RecentAnswers_Query";
+  var GQL_CONNECTION_KEY = "recentPublicAndPinnedAnswersConnection";
+  var GQL_DEFAULT_HASH =
+    "0c7ab9ef87775512e02d48001ab55778e196125cf361e0e351d4eb5c8d8cac3a";
+  var GQL_PAGE_SIZE = 20;
+  var GQL_EMPTY_PAGE_LIMIT = 3;
+  // Deep pagination over many hundreds of pages can trip Quora rate limiting,
+  // surfacing as a network-level "Failed to fetch". Retry transient failures
+  // with exponential backoff and pace requests slightly to stay under the radar.
+  var GQL_MAX_RETRIES = 4;
+  var GQL_RETRY_BASE_MS = 1000;
+  var GQL_PAGE_DELAY_MS = 150;
+
+  function gqlPageHtml() {
+    return document.documentElement ? document.documentElement.innerHTML : "";
+  }
+
+  function extractPageContext() {
+    var html = gqlPageHtml();
+    var uid = html.match(/"rootQueryVariables"\s*:\s*\{\s*"uid"\s*:\s*(\d+)/);
+    var formkey = html.match(/"formkey"\s*:\s*"([0-9a-fA-F]+)"/);
+    var revision = html.match(/"revision"\s*:\s*"([\w-]+)"/);
+    return {
+      uid: uid ? parseInt(uid[1], 10) : null,
+      formkey: formkey ? formkey[1] : null,
+      revision: revision ? revision[1] : null,
+    };
+  }
+
+  function qtextToPlain(qtext) {
+    if (!qtext) return "";
+    var doc = qtext;
+    if (typeof qtext === "string") {
+      try {
+        doc = JSON.parse(qtext);
+      } catch (e) {
+        return qtext.trim();
+      }
+    }
+    if (!doc || !doc.sections) return "";
+    return doc.sections
+      .map(function (section) {
+        return (section.spans || [])
+          .map(function (span) {
+            return span.text || "";
+          })
+          .join("");
+      })
+      .join("\n")
+      .trim();
+  }
+
+  function mapNodeToRecord(node) {
+    if (!node) return null;
+    var url = node.url || node.permaUrl;
+    if (!url) return null;
+    var question = node.question || {};
+    var answerText = qtextToPlain(node.content);
+    return {
+      url: url,
+      answer_url: url,
+      aid: node.aid != null ? String(node.aid) : null,
+      question_title: qtextToPlain(question.title),
+      question_url: question.url || "",
+      answer_preview: answerText.slice(0, 500),
+      answer_text: answerText,
+      num_upvotes: node.numUpvotes,
+      num_views: node.numViews,
+      num_comments: node.numDisplayComments,
+      creation_time: node.creationTime,
+      seen_at: new Date().toISOString(),
+    };
+  }
+
+  // GraphQL answer URLs use the "question-slug/answer/author-slug" form, so the
+  // shared answerKeyFromUrl() (which reads the segment after /answer/) collapses
+  // to the same author slug for every answer. The per-answer canonical pathname
+  // is still unique, so known-detection here keys on that only — never on the
+  // degenerate author-slug key.
+  function gqlIsKnown(url, known) {
+    if (!known || !url) return false;
+    var canonical = canonicalAnswerKey(url);
+    return !!(canonical && known.byUrl[canonical]);
+  }
+
+  function answersConnectionFrom(resp) {
+    var user = (resp && resp.data && resp.data.user) || {};
+    var conn = user[GQL_CONNECTION_KEY];
+    if (conn && conn.edges) return conn;
+    for (var key in user) {
+      if (user[key] && user[key].edges && user[key].pageInfo) return user[key];
+    }
+    return null;
+  }
+
+  async function fetchAnswersPage(ctx, after, first, queryHash) {
+    var headers = { "content-type": "application/json", "quora-formkey": ctx.formkey };
+    if (ctx.revision) headers["quora-revision"] = ctx.revision;
+    var variables = { uid: ctx.uid, first: first, answerFilterTid: null };
+    if (after != null) variables.after = after;
+    var body = JSON.stringify({
+      queryName: GQL_QUERY_NAME,
+      variables: variables,
+      extensions: { hash: queryHash },
+    });
+    var r;
+    try {
+      r = await fetch(location.origin + "/graphql/gql_para_POST?q=" + GQL_QUERY_NAME, {
+        method: "POST",
+        credentials: "include",
+        headers: headers,
+        body: body,
+      });
+    } catch (e) {
+      // Network-level failure ("Failed to fetch") — usually transient/throttling.
+      var netErr = new Error("network: " + ((e && e.message) || e));
+      netErr.retriable = true;
+      throw netErr;
+    }
+    if (!r.ok) {
+      var httpErr = new Error("HTTP " + r.status);
+      httpErr.retriable = r.status === 429 || r.status >= 500;
+      throw httpErr;
+    }
+    return r.json();
+  }
+
+  async function fetchAnswersPageRetry(ctx, after, first, queryHash) {
+    var lastErr;
+    for (var attempt = 0; attempt <= GQL_MAX_RETRIES; attempt++) {
+      try {
+        return await fetchAnswersPage(ctx, after, first, queryHash);
+      } catch (e) {
+        lastErr = e;
+        if (!e || !e.retriable || attempt === GQL_MAX_RETRIES) throw e;
+        var delay = GQL_RETRY_BASE_MS * Math.pow(2, attempt);
+        console.warn(
+          "[qsbk gql] transient fetch error at after=" + after +
+            " (attempt " + (attempt + 1) + "/" + (GQL_MAX_RETRIES + 1) +
+            "), backing off " + delay + "ms:",
+          (e && e.message) || e
+        );
+        await sleep(delay);
+      }
+    }
+    throw lastErr;
+  }
+
+  async function collectViaGraphql(maxResults, options) {
+    options = options || {};
+    var known = options.known || buildKnownLookup({});
+    var skipKnown = options.skipKnown !== false;
+    var queryHash = options.queryHash || GQL_DEFAULT_HASH;
+    var pageSize = options.pageSize || GQL_PAGE_SIZE;
+
+    var ctx = extractPageContext();
+    console.info(
+      "[qsbk gql] start — uid=" + ctx.uid +
+        " formkey=" + (ctx.formkey ? "yes" : "MISSING") +
+        " revision=" + (ctx.revision ? "yes" : "no") +
+        " maxResults=" + maxResults +
+        " skipKnown=" + skipKnown +
+        " pageSize=" + pageSize
+    );
+    if (!ctx.uid || !ctx.formkey) {
+      console.error(
+        "[qsbk gql] context_missing — could not read uid/formkey from the page. " +
+          "Are you on a /profile/<user>/answers page while logged in?"
+      );
+      return {
+        rows: [],
+        meta: {
+          stop_reason: "context_missing",
+          collected: 0,
+          requested: maxResults,
+          mode: "graphql",
+          skip_known: skipKnown,
+        },
+      };
+    }
+
+    var records = {};
+    var seenSkippedKeys = {};
+    var skippedKnown = 0;
+    var after = null;
+    var pages = 0;
+    var emptyPages = 0;
+    var deepestUrl = null;
+    var stopReason = "max_reached";
+
+    function sendProgress() {
+      var found = Object.keys(records).length;
+      try {
+        // Intentionally omit `rows` here: the API method is fast and can collect
+        // thousands of answers, so streaming the full growing set on every page
+        // would trigger a live-classify /check storm in the popup. Counts drive
+        // the progress UI; the final classify+publish uses the complete result.
+        chrome.runtime.sendMessage({
+          type: "progress",
+          found: found,
+          newFound: found,
+          scrolled: skippedKnown,
+          max: maxResults,
+          stagnant: 0,
+          recovering: false,
+          resumePending: false,
+          pruned: 0,
+        });
+      } catch (e) {
+        /* popup closed */
+      }
+    }
+
+    while (running && Object.keys(records).length < maxResults) {
+      var resp;
+      try {
+        resp = await fetchAnswersPageRetry(ctx, after, pageSize, queryHash);
+      } catch (e) {
+        // Exhausted retries (or non-retriable). Keep what we collected so far
+        // rather than discarding the whole run.
+        stopReason = "api_error:" + String((e && e.message) || e);
+        console.error(
+          "[qsbk gql] fetch failed at after=" + after +
+            " after retries — stopping with " + Object.keys(records).length +
+            " collected:",
+          e
+        );
+        break;
+      }
+
+      var conn = answersConnectionFrom(resp);
+      if (!conn) {
+        stopReason = "no_connection";
+        console.error(
+          "[qsbk gql] no answers connection in response (query hash may be stale):",
+          resp
+        );
+        break;
+      }
+
+      var edges = conn.edges || [];
+      var addedThisPage = 0;
+      for (var i = 0; i < edges.length; i++) {
+        if (Object.keys(records).length >= maxResults) break;
+        var record = mapNodeToRecord(edges[i] && edges[i].node);
+        if (!record) continue;
+        deepestUrl = record.url;
+        if (records[record.url]) continue;
+        if (skipKnown && gqlIsKnown(record.url, known)) {
+          var skipKey = canonicalAnswerKey(record.url);
+          if (skipKey && !seenSkippedKeys[skipKey]) {
+            seenSkippedKeys[skipKey] = true;
+            skippedKnown += 1;
+          }
+          continue;
+        }
+        records[record.url] = record;
+        addedThisPage += 1;
+      }
+
+      pages += 1;
+      var pageInfoLog = conn.pageInfo || {};
+      console.info(
+        "[qsbk gql] page " + pages +
+          " — edges=" + edges.length +
+          " new=" + addedThisPage +
+          " total=" + Object.keys(records).length +
+          " skippedKnown=" + skippedKnown +
+          " after=" + after +
+          " endCursor=" + pageInfoLog.endCursor +
+          " hasNext=" + pageInfoLog.hasNextPage
+      );
+      if (typeof window.qsbkMarkCached === "function") window.qsbkMarkCached();
+      sendProgress();
+
+      // Reverse-chronological feed: a run of all-known pages means we have
+      // caught up with what's already ingested — stop rather than scan history.
+      if (skipKnown && addedThisPage === 0) {
+        emptyPages += 1;
+        if (emptyPages >= GQL_EMPTY_PAGE_LIMIT) {
+          stopReason = "all_known";
+          break;
+        }
+      } else {
+        emptyPages = 0;
+      }
+
+      var pageInfo = conn.pageInfo || {};
+      if (!pageInfo.hasNextPage) {
+        stopReason = "exhausted";
+        break;
+      }
+      var nextAfter = pageInfo.endCursor;
+      if (nextAfter == null || String(nextAfter) === String(after)) {
+        stopReason = "cursor_stalled";
+        break;
+      }
+      after = String(nextAfter);
+      if (GQL_PAGE_DELAY_MS > 0) await sleep(GQL_PAGE_DELAY_MS);
+    }
+
+    var rows = recordsAsRows(records).slice(0, maxResults);
+    console.info(
+      "[qsbk gql] done — stop_reason=" + stopReason +
+        " collected=" + rows.length +
+        " skippedKnown=" + skippedKnown +
+        " pages=" + pages
+    );
+    if (typeof window.qsbkRefreshMarks === "function") {
+      await window.qsbkRefreshMarks();
+    }
+
+    return {
+      rows: rows,
+      meta: {
+        stop_reason: stopReason,
+        collected: rows.length,
+        requested: maxResults,
+        skipped_known: skippedKnown,
+        skip_known: skipKnown,
+        mode: "graphql",
+        pages: pages,
+        deepest_url: deepestUrl,
+        deepest_key: deepestUrl ? answerKeyFromUrl(deepestUrl) : null,
+      },
+    };
+  }
+
+  window.qsbkCollectViaGraphql = collectViaGraphql;
+
+  async function scrollAndCollect(maxResults, options) {
+    options = options || {};
+    var known = options.known || buildKnownLookup({});
+    var skipKnown = options.skipKnown !== false;
+    var resumeAfterKey = options.resumeAfterKey || null;
     var records = {};
     var stagnant = 0;
     var lastCount = 0;
     var recoveryRounds = 0;
     var stopReason = "max_reached";
     var lastMetrics = pageMetrics();
+    var scrolledKnown = 0;
+    var seenSkippedKeys = {};
+    var prunedTotal = 0;
+    var resumeReached = !resumeAfterKey;
+    var lastProgressCount = -1;
+    var deepestUrl = null;
 
     function markIngestedAnswers() {
       if (typeof window.qsbkMarkCached === "function") {
@@ -294,76 +817,123 @@
       }
     }
 
-    while (running && Object.keys(records).length < maxResults) {
-      mergeRecords(records, extractAnswerRecords());
-      markIngestedAnswers();
-
+    function sendProgress(opts) {
       var found = Object.keys(records).length;
+      var payload = {
+        type: "progress",
+        found: found,
+        newFound: found,
+        scrolled: scrolledKnown,
+        max: maxResults,
+        stagnant: stagnant,
+        recovering: !!opts.recovering,
+        resumePending: !resumeReached,
+        pruned: prunedTotal,
+      };
+      if (found !== lastProgressCount || opts.forceRows) {
+        payload.rows = recordsAsRows(records);
+        lastProgressCount = found;
+      }
       try {
-        chrome.runtime.sendMessage({
-          type: "progress",
-          found: found,
-          max: maxResults,
-          stagnant: stagnant,
-          recovering: false,
-          rows: Object.keys(records)
-            .sort()
-            .map(function (k) {
-              return records[k];
-            }),
-        });
+        chrome.runtime.sendMessage(payload);
       } catch (e) {
         /* popup closed */
       }
+    }
 
+    function ingestPass() {
+      var batch = collectNewRecords(records, known, skipKnown, seenSkippedKeys);
+      scrolledKnown += batch.skippedKnown;
+      if (batch.deepestUrl) deepestUrl = batch.deepestUrl;
+      if (PRUNE_ENABLED) prunedTotal += pruneDomAbove(records, known);
+      return batch;
+    }
+
+    function metricsGrew(before, after, batch) {
+      return (
+        after > before ||
+        (batch && batch.skippedKnown > 0) ||
+        metrics.scrollHeight > lastMetrics.scrollHeight ||
+        metrics.anchorCount > lastMetrics.anchorCount
+      );
+    }
+
+    while (running && Object.keys(records).length < maxResults) {
+      if (!resumeReached) {
+        var resumeMetrics = pageMetrics();
+        if (pageHasResumeMarker(resumeAfterKey)) {
+          resumeReached = true;
+          stagnant = 0;
+          if (PRUNE_ENABLED) prunedTotal += pruneDomAbove({}, known);
+        } else {
+          window.scrollTo(0, document.body.scrollHeight);
+          await sleep(FAST_SCROLL_PAUSE_MS);
+          var resumeSkipped = countSkippedOnly(records, known, seenSkippedKeys);
+          scrolledKnown += resumeSkipped;
+          if (PRUNE_ENABLED) prunedTotal += pruneDomAbove({}, known);
+          var resumeAfterMetrics = pageMetrics();
+          sendProgress({ recovering: false, forceRows: false });
+          if (
+            resumeSkipped > 0 ||
+            resumeAfterMetrics.scrollHeight > resumeMetrics.scrollHeight ||
+            resumeAfterMetrics.anchorCount > resumeMetrics.anchorCount
+          ) {
+            stagnant = 0;
+          } else {
+            stagnant += 1;
+          }
+          if (stagnant >= RESUME_STAGNANT_LIMIT) {
+            stopReason = "resume_not_found";
+            resumeReached = true;
+            stagnant = 0;
+          } else {
+            continue;
+          }
+        }
+      }
+
+      ingestPass();
+      markIngestedAnswers();
+      sendProgress({ recovering: false });
+
+      var found = Object.keys(records).length;
       if (found >= maxResults) {
         stopReason = "max_reached";
         break;
       }
 
+      var pauseMs = SCROLL_PAUSE_MS;
+      if (skipKnown && scrolledKnown > 0 && found === lastCount) {
+        pauseMs = FAST_SCROLL_PAUSE_MS;
+      }
+
       window.scrollTo(0, document.body.scrollHeight);
-      await sleep(SCROLL_PAUSE_MS);
-      mergeRecords(records, extractAnswerRecords());
+      await sleep(pauseMs);
+      var batch = ingestPass();
       markIngestedAnswers();
 
       var after = Object.keys(records).length;
       var metrics = pageMetrics();
-      var grew =
-        after > lastCount ||
-        metrics.scrollHeight > lastMetrics.scrollHeight ||
-        metrics.anchorCount > lastMetrics.anchorCount;
+      var grew = metricsGrew(lastCount, after, batch);
+
+      sendProgress({ recovering: false });
 
       if (!grew) {
         stagnant += 1;
 
         if (stagnant >= 2 && recoveryRounds < MAX_RECOVERY_ROUNDS) {
-          try {
-            chrome.runtime.sendMessage({
-              type: "progress",
-              found: after,
-              max: maxResults,
-              stagnant: stagnant,
-              recovering: true,
-              rows: Object.keys(records)
-                .sort()
-                .map(function (k) {
-                  return records[k];
-                }),
-            });
-          } catch (e2) {
-            /* popup closed */
-          }
+          sendProgress({ recovering: true, forceRows: true });
 
           var recovered = await tryRecoverFromStall(lastMetrics);
           recoveryRounds += 1;
-          mergeRecords(records, extractAnswerRecords());
+          var recoveryBatch = ingestPass();
           markIngestedAnswers();
           after = Object.keys(records).length;
           metrics = pageMetrics();
 
           if (
             recovered ||
-            after > lastCount ||
+            metricsGrew(lastCount, after, recoveryBatch) ||
             metrics.scrollHeight > lastMetrics.scrollHeight
           ) {
             stagnant = 0;
@@ -373,7 +943,12 @@
           }
         }
 
-        if (stagnant >= STAGNANT_LIMIT) {
+        var stuckLimit = STAGNANT_LIMIT;
+        if (skipKnown && after === 0 && scrolledKnown > 0) {
+          stuckLimit = STAGNANT_LIMIT + 6;
+        }
+
+        if (stagnant >= stuckLimit) {
           stopReason = "pagination_stuck";
           break;
         }
@@ -384,12 +959,7 @@
       }
     }
 
-    var rows = Object.keys(records)
-      .sort()
-      .slice(0, maxResults)
-      .map(function (k) {
-        return records[k];
-      });
+    var rows = recordsAsRows(records).slice(0, maxResults);
 
     if (typeof window.qsbkRefreshMarks === "function") {
       await window.qsbkRefreshMarks();
@@ -405,6 +975,12 @@
         recovery_attempts: recoveryRounds,
         collected: rows.length,
         requested: maxResults,
+        skipped_known: scrolledKnown,
+        pruned_nodes: prunedTotal,
+        skip_known: skipKnown,
+        resume_after_key: resumeAfterKey || null,
+        deepest_url: deepestUrl,
+        deepest_key: deepestUrl ? answerKeyFromUrl(deepestUrl) : null,
       },
     };
   }
@@ -428,15 +1004,36 @@
     }
 
     running = true;
-    var maxResults = Math.max(1, Math.min(5000, msg.maxResults || 100));
+    window.__qsbkScrapeRunning = true;
+    var maxResults = Math.max(1, parseInt(msg.maxResults, 10) || 100);
+    var skipKnown = msg.skipKnown !== false;
+    var resumeAfterKey = msg.resumeAfterKey || null;
+    var mode = msg.mode === "graphql" ? "graphql" : "scroll";
 
-    scrollAndCollect(maxResults)
+    loadKnownLookup()
+      .then(function (known) {
+        if (mode === "graphql") {
+          return collectViaGraphql(maxResults, {
+            known: known,
+            skipKnown: skipKnown,
+            queryHash: msg.queryHash || null,
+            pageSize: msg.pageSize || null,
+          });
+        }
+        return scrollAndCollect(maxResults, {
+          known: known,
+          skipKnown: skipKnown,
+          resumeAfterKey: resumeAfterKey,
+        });
+      })
       .then(function (result) {
         running = false;
+        window.__qsbkScrapeRunning = false;
         sendResponse({ ok: true, rows: result.rows, meta: result.meta });
       })
       .catch(function (err) {
         running = false;
+        window.__qsbkScrapeRunning = false;
         sendResponse({ ok: false, error: String(err) });
       });
 

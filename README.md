@@ -1,14 +1,178 @@
-# Quora Profile Scraper
+# Quora Profile Scraper (qsbk)
 
-Scrape Quora profile answer URLs and stream them to Kafka (or stdout). A Kafka subscriber upserts each message into MongoDB Atlas.
+Collect Quora answer URLs from a logged-in browser or headless Selenium, dedupe against MongoDB, and stream new rows to Kafka. A subscriber upserts each message into MongoDB Atlas.
+
+Two ways to collect URLs:
+
+| Method | Best for |
+|--------|----------|
+| **Chrome extension** | Day-to-day use on your `/answers` tab while logged into Quora |
+| **`qsbk` CLI (Selenium)** | Automation, containers, profiles you drive headlessly |
 
 ## Architecture
 
 ```
-Quora profile → quora-scraper → Kafka (LAN) → quora-subscriber → MongoDB Atlas
+Chrome extension (Mac)
+    → qsbk serve (:8765)  — check / upsert / known
+        → Kafka (bokomint)
+            → qsbk subscriber
+                → MongoDB Atlas
+
+Optional: Quora profile → qsbk (Selenium) → Kafka → subscriber → MongoDB
 ```
 
-Message contract (unchanged): `{"url": "...", "hash": "<blake2s-16>"}` per answer URL.
+Message contract: `{"url": "...", "hash": "<blake2s-16>"}` per answer URL.
+
+---
+
+## Chrome extension
+
+### Purpose
+
+The qsbk Chrome extension scrolls a **logged-in** Quora **`/answers`** page and:
+
+- Collects answer URLs (profile-style `/answer/<id>-…` links preferred)
+- **Dedupes against MongoDB** via `qsbk serve` (`POST /check` while scrolling, `POST /upsert` at the end)
+- **Publishes only new answers to Kafka** (default output) for the subscriber to persist
+- Shows **live session stats** (count, rate, new/skipped, ETA)
+- Marks **already ingested** answers with a green ✓ on the avatar (from `GET /known`, no scrape needed)
+
+The control panel opens when you click the qsbk icon. Checkmarks and `/known` polling run automatically on `/answers` pages as long as the extension is enabled.
+
+### Install the extension
+
+**1. Install the CLI** (once, or after Python/package changes):
+
+```bash
+uv tool install --force /path/to/quorascrapper
+```
+
+**2. Copy the extension** and point it at `qsbk serve`:
+
+```bash
+# Direct LAN (if port 8765 is open on bokomint)
+qsbk install --serve-url http://bokomint.local:8765
+
+# Or via SSH tunnel (Mac terminal — leave running)
+ssh -N -L 8765:127.0.0.1:8765 bokomint.local
+qsbk install --serve-url http://127.0.0.1:8765
+```
+
+`qsbk install` prints the extension **version** and **source path**. Reload Chrome after every install.
+
+**3. Load in Chrome**
+
+1. Open `chrome://extensions`
+2. Enable **Developer mode**
+3. **Load unpacked** → `~/.local/share/qsbk/chrome-extension`
+4. Click **Reload** on the qsbk card after updates
+
+Confirm the panel header shows the expected version (e.g. `v0.9.8`).
+
+**Fast dev loop** (skip CLI reinstall): load unpacked directly from `extension/` in the repo, or set `QSBK_EXTENSION_DIR=/path/to/quorascrapper/extension` before `qsbk install`.
+
+### Use the extension
+
+1. Log into Quora in Chrome
+2. Open a profile answers tab, e.g. `https://pt.quora.com/profile/<user>/answers`
+3. Ensure **qsbk serve** is reachable (tunnel or LAN) — status line should show **online**
+4. Click the **qsbk** icon → set **Max answers** (click the profile total to copy it into max)
+5. **Output** defaults to **Kafka**; choose **JSON file download** or **CSV** if you only want a local export
+6. Click **Scrape this tab**
+
+While scraping, the panel shows collected count, answers/min, **new · skipped**, start time (local), and ETA. At the end, Kafka mode sends only **new** rows; skipped rows were already in Mongo.
+
+### Download a JSON file
+
+1. Open the qsbk panel on an `/answers` tab
+2. Set **Output** → **JSON file download**
+3. Click **Scrape this tab**
+4. Chrome downloads `qsbk-answers-<timestamp>.json` with:
+   - `answers[]` — `answer_url`, `question_title`, `question_url`, `answer_preview`, `seen_at`
+   - `meta` — `stop_reason`, session timing, new/skipped counts (when serve is online)
+   - `profile_url`, `exported_at`, `count`
+
+With serve online, the JSON contains **new answers only** (same set that would go to Kafka). For a offline export of everything visible, turn serve off or use CSV/JSON without dedupe (serve offline).
+
+**Optional:** pipe through the filter CLI for Kafka-style hashes:
+
+```bash
+quora-filter qsbk-answers-....json -o answers.jsonl
+```
+
+### Check the data
+
+**Serve (via tunnel or LAN)**
+
+```bash
+curl http://127.0.0.1:8765/ping
+curl http://127.0.0.1:8765/known | python3 -m json.tool | head -30
+```
+
+**MongoDB** (use your env file or `~/.config/qsbk/env`):
+
+```bash
+export $(grep -v '^#' ~/.config/qsbk/env | xargs)
+uv run python -c "
+from quorascrapper.config import Settings
+from pymongo import MongoClient
+s = Settings.from_env()
+c = MongoClient(s.mongodb_uri)[s.mongodb_database][s.mongodb_collection]
+print('documents:', c.count_documents({}))
+print('latest:', c.find_one(sort=[('_id', -1)]))
+"
+```
+
+**Live Mongo watch**
+
+```bash
+export $(grep -v '^#' ~/.config/qsbk/env | xargs)
+uv run python monitor_mongodb.py
+```
+
+**Stack on bokomint**
+
+```bash
+./deploy_bokomint.sh status
+./deploy_bokomint.sh logs
+./deploy_bokomint.sh logs subscriber
+./deploy_bokomint.sh logs serve
+```
+
+**Audit URL formats in Mongo**
+
+```bash
+qsbk verify-urls
+```
+
+**On the Quora page:** green ✓ badges = already in Mongo (`/known`). They appear on page load (and after ingest + ~2.5s poll), not only after you run a scrape.
+
+### Extension troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| Chrome still shows old version (e.g. 0.9.6) | `uv tool install --force .` then `qsbk install …`; **Reload** in `chrome://extensions`. Or load unpacked from `extension/` in the repo. |
+| `qsbk install: unrecognized arguments: --serve-url` | CLI is stale — `uv tool install --force /path/to/quorascrapper` |
+| `qsbk serve: offline` in panel | Start tunnel: `ssh -N -L 8765:127.0.0.1:8765 bokomint.local` or open port 8765 on bokomint (`sudo ufw allow 8765/tcp`) |
+| `bind [127.0.0.1]:8765: Address already in use` | Tunnel already running — use it, or `kill $(lsof -ti:8765)` and restart one tunnel |
+| `curl bokomint.local:8765` times out from Mac | Use SSH tunnel + `http://127.0.0.1:8765`, or fix LAN firewall |
+| Kafka option disabled | Serve not reachable — fix tunnel/serve first |
+| No ✓ badges | Serve offline or answer not in Mongo yet; current-session rows get badges after upsert + subscriber + poll |
+| Mongo count stuck during scrape | Normal — `/upsert` runs when the scrape **finishes**; subscriber then writes to Atlas |
+| Subscriber warnings `non_canonical_answer_url` | Old question-slug URLs in Kafka payload; re-scrape with current extension for profile-style URLs |
+
+More detail: [`extension/README.md`](extension/README.md).
+
+### Feedback
+
+This extension and pipeline are evolving. If something is confusing, broken, or missing:
+
+- Open an issue or PR on [GitHub](https://github.com/Bokomoko/quorascrapper)
+- Note your setup: extension version, serve URL (tunnel vs LAN), output mode, and what you expected vs what happened
+
+Comments on UX (panel layout, defaults, checkmarks, ETA) are especially welcome.
+
+---
 
 ## Setup
 

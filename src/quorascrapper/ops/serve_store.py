@@ -140,12 +140,24 @@ class ServeState:
             )
 
         published_urls: list[str] = []
+        str_keys = (
+            "question_title",
+            "answer_preview",
+            "question_url",
+            "seen_at",
+            "answer_text",
+            "aid",
+        )
+        num_keys = ("num_upvotes", "num_views", "num_comments", "creation_time")
         for row in report.new:
-            payload: dict[str, str] = {"url": row["url"]}
+            payload: dict[str, Any] = {"url": row["url"]}
             if row.get("hash"):
                 payload["hash"] = row["hash"]
-            for key in ("question_title", "answer_preview", "question_url", "seen_at"):
+            for key in str_keys:
                 if row.get(key):
+                    payload[key] = row[key]
+            for key in num_keys:
+                if row.get(key) is not None:
                     payload[key] = row[key]
             self.sender.send(payload)
             published_urls.append(row["url"])

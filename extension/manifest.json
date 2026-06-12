@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "qsbk — Quora answer URL collector",
-  "version": "0.9.8",
-  "description": "Scroll a logged-in Quora /answers page, export CSV/JSON or send to Kafka via qsbk serve.",
+  "version": "0.9.19",
+  "description": "Collect a logged-in Quora /answers page via GraphQL API (or scroll), export CSV/JSON or send to Kafka via qsbk serve.",
   "permissions": ["activeTab", "scripting", "storage", "tabs"],
   "host_permissions": [
     "*://*.quora.com/*",

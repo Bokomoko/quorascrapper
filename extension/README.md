@@ -20,15 +20,36 @@ Choose export format in the popup: **CSV**, **JSONL**, or **Both**.
 
 1. Log into Quora in Chrome
 2. Open e.g. `https://pt.quora.com/profile/<user>/answers`
-3. Click the **qsbk** extension → set max and **Export format** (default **JSON**) → **Scrape this tab**
-4. JSON export includes `question_title`, `answer_url`, optional `answer_preview`, and `stop_reason` in metadata
+3. Click the **qsbk** extension → set max, **Method**, and **Output** → **Scrape this tab**
+4. Export includes `question_title`, `answer_url`, optional `answer_preview`, and `stop_reason` in metadata
 
-### Pagination stuck?
+### Method: API (GraphQL) vs Scroll
 
-The scraper detects stalls (no new answers / no scroll growth) and tries recovery:
-scroll nudges + optional "More answers" click. If still stuck, `stop_reason` is `pagination_stuck`.
+- **API (GraphQL)** — *default, recommended.* Calls Quora's own paginated answers
+  endpoint (`UserProfileAnswersMostRecent_RecentAnswers_Query`) directly from the
+  page using your live session. It walks the cursor (`after` → `endCursor`) until
+  the feed is exhausted — no scrolling, no stalls — and returns full content:
+  `answer_text`, `aid`, `num_upvotes`, `num_views`, `num_comments`, `creation_time`.
+- **Scroll (DOM)** — legacy fallback that scrolls the page and scrapes answer
+  anchors. Use only if the API method reports `context_missing` (e.g. the page
+  shape changed) or `api_error`.
 
-**Recover manually:** scroll the Quora page yourself to load more, then scrape again. `qsbk ingest` skips duplicates (idempotent).
+The API method reconstructs nothing it can't read from the page: `uid`, `formkey`
+and `revision` are parsed from the page's inline bootstrap script, and the
+persisted-query hash defaults to a known value (override per request if Quora
+rotates it). If Quora updates the query, re-capture the hash from a fresh HAR and
+set `QUORA_ANSWERS_QUERY_HASH` (CLI) or pass `queryHash` in the message.
+
+### Pagination stuck? (Scroll method only)
+
+The scroll scraper detects stalls (no new answers / no scroll growth) and tries
+recovery: scroll nudges + optional "More answers" click. If still stuck,
+`stop_reason` is `pagination_stuck`. The API method does not stall — it reports
+`exhausted` (reached the end), `all_known` (caught up with already-ingested
+answers), or `max_reached`.
+
+**Recover manually:** switch to the API method, or scroll the Quora page yourself
+to load more and scrape again. `qsbk ingest` skips duplicates (idempotent).
 
 ## Pipeline (add hashes for Kafka/Mongo)
 
@@ -46,9 +67,9 @@ Output columns: `url`, `hash`, `seen_at` — same `blake2s` hash as `qsbk` Kafka
 
 ```
 Quora tab (logged in)
-  → scroll + grep /answer/
-  → CSV / JSONL download
-  → quora-filter
-  → JSONL (url, hash)
-  → (optional) Kafka / subscriber
+  → API (GraphQL pagination)  ──┐   default
+  → or scroll + grep /answer/ ──┤   fallback
+                                ↓
+  → CSV / JSONL download → quora-filter → JSONL (url, hash)
+  → or Kafka (via qsbk serve) → subscriber → MongoDB
 ```

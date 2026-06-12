@@ -3,8 +3,8 @@ import sys
 
 from quorascrapper import __version__
 from quorascrapper.config import Settings, load_project_env
-from quorascrapper.messaging import KafkaSender, StdoutSender
 from quorascrapper.exceptions import LoginWallError
+from quorascrapper.messaging import KafkaSender, StdoutSender
 from quorascrapper.ops.dry_run import print_dry_run_report, run_dry_run
 from quorascrapper.ops.gate import (
     EXIT_LOGIN_WALL,
@@ -38,6 +38,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Output sender (default: stdout)",
     )
     parser.add_argument(
+        "--mode",
+        choices=["scroll", "graphql"],
+        default=settings.scrape_mode,
+        help="Extraction mode: scroll (DOM, default) or graphql (API pagination)",
+    )
+    parser.add_argument(
         "--check-mongo",
         action="store_true",
         help="Run MongoDB checks only (DNS + ping)",
@@ -58,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         version=f"qsbk {__version__}",
     )
     args = parser.parse_args(argv)
+    settings.scrape_mode = args.mode
 
     profile_url = resolve_profile_url(
         args.profile_url, settings.profile_url or None, DEFAULT_PROFILE_URL

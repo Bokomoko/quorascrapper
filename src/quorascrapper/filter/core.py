@@ -27,19 +27,32 @@ def answer_url_kind(url: str) -> str:
     return "question"
 
 
-def normalize_row(row: dict[str, Any]) -> dict[str, str] | None:
+# Optional richer fields captured by the GraphQL extension method. Strings are
+# copied as-is; numeric fields are preserved as numbers (0 is meaningful).
+_PASSTHROUGH_STR = (
+    "seen_at",
+    "question_title",
+    "answer_preview",
+    "question_url",
+    "answer_text",
+    "aid",
+)
+_PASSTHROUGH_NUM = ("num_upvotes", "num_views", "num_comments", "creation_time")
+
+
+def normalize_row(row: dict[str, Any]) -> dict[str, Any] | None:
     url = (row.get("url") or row.get("answer_url") or "").strip()
     if not url or "/answer/" not in url:
         return None
-    out: dict[str, str] = {"url": url, "hash": url_hash(url)}
-    if seen := row.get("seen_at"):
-        out["seen_at"] = str(seen)
-    if title := row.get("question_title"):
-        out["question_title"] = str(title)
-    if preview := row.get("answer_preview"):
-        out["answer_preview"] = str(preview)
-    if qurl := row.get("question_url"):
-        out["question_url"] = str(qurl)
+    out: dict[str, Any] = {"url": url, "hash": url_hash(url)}
+    for key in _PASSTHROUGH_STR:
+        value = row.get(key)
+        if value not in (None, ""):
+            out[key] = str(value)
+    for key in _PASSTHROUGH_NUM:
+        value = row.get(key)
+        if value is not None:
+            out[key] = value
     return out
 
 

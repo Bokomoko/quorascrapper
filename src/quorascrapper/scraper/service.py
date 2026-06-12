@@ -5,9 +5,9 @@ from __future__ import annotations
 import time
 
 from quorascrapper.config import Settings
+from quorascrapper.exceptions import LoginWallError
 from quorascrapper.logging_setup import init_logging
 from quorascrapper.messaging import KafkaSender, StdoutSender
-from quorascrapper.exceptions import LoginWallError
 from quorascrapper.scraper.browser import create_driver, quit_driver
 from quorascrapper.scraper.extract import (
     block_fallback_scan,
@@ -15,6 +15,7 @@ from quorascrapper.scraper.extract import (
     fast_anchor_scan,
     process_anchor,
 )
+from quorascrapper.scraper.graphql import extract_page_context, paginate_answers
 from quorascrapper.scraper.scroll import scroll_to_bottom
 from quorascrapper.scraper.stats import (
     compute_answer_limit,
@@ -83,6 +84,47 @@ class QuoraScraper:
         self._send_url(url)
         self.processed += 1
 
+    def _send_payload(self, payload: dict) -> None:
+        url = payload.get("url", "")
+        try:
+            self.sender.send(payload)
+            self.logger.debug("payload_sent", extra={"event": "payload_sent", "url": url})
+        except Exception as exc:
+            self.logger.error(
+                "payload_send_error",
+                extra={"event": "payload_send_error", "url": url, "error": str(exc)},
+            )
+
+    def _extract_via_graphql(self, url: str) -> int:
+        ctx = extract_page_context(self.driver)
+        uid, formkey = ctx.get("uid"), ctx.get("formkey")
+        if not uid or not formkey:
+            self.logger.error(
+                "graphql_context_missing",
+                extra={
+                    "event": "graphql_context_missing",
+                    "uid": uid,
+                    "has_formkey": bool(formkey),
+                },
+            )
+            return self.processed
+
+        self.logger.info("GraphQL mode: uid=%s page_size=%s", uid, self.settings.graphql_page_size)
+        for payload in paginate_answers(
+            self.driver,
+            profile_url=url,
+            uid=uid,
+            formkey=formkey,
+            query_hash=self.settings.answers_query_hash,
+            revision=ctx.get("revision"),
+            page_size=self.settings.graphql_page_size,
+            limit=self._limit(),
+            logger=self.logger,
+        ):
+            self._send_payload(payload)
+            self.processed += 1
+        return self.processed
+
     def extract_content(self, url: str) -> int:
         self.logger.info("Loading profile: %s", url)
         self.driver.get(url)
@@ -126,6 +168,12 @@ class QuoraScraper:
             except Exception as exc:
                 self.logger.warning("Initial stats extraction failed: %s", exc)
                 self.answer_limit = self.settings.max_results
+
+            if self.settings.scrape_mode == "graphql":
+                self._extract_via_graphql(url)
+                self.sender.flush(15)
+                self.logger.info("Captured %d answers in total", self.processed)
+                return self.processed
 
             scroll_to_bottom(
                 self.driver,

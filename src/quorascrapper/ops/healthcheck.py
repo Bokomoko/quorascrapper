@@ -1,5 +1,8 @@
 """Runtime container health probes."""
 
+from __future__ import annotations
+
+import json
 import os
 import sys
 import urllib.error
@@ -41,20 +44,42 @@ def check_subscriber(settings: Settings | None = None) -> int:
     return 0
 
 
-def check_serve(settings: Settings | None = None, *, ping_url: str | None = None) -> int:
-    """Kafka + Mongo deps, then HTTP ping for the local serve process."""
-    if check_subscriber(settings) != 0:
-        return 1
+def check_serve_liveness(*, ping_url: str | None = None, timeout_sec: float = 5.0) -> int:
+    """Fast probe: is the HTTP serve process responding on /ping?"""
     url = ping_url or DEFAULT_SERVE_PING
     try:
-        with urllib.request.urlopen(url, timeout=5) as resp:
+        with urllib.request.urlopen(url, timeout=timeout_sec) as resp:
             if resp.status != 200:
                 print(f"serve ping returned {resp.status}", file=sys.stderr)
                 return 1
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            body = json.loads(resp.read().decode("utf-8"))
+            if not body.get("ok"):
+                print(f"serve ping body not ok: {body!r}", file=sys.stderr)
+                return 1
+            if body.get("service") not in (None, "qsbk-serve"):
+                print(f"unexpected serve ping service: {body!r}", file=sys.stderr)
+                return 1
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
         print(f"serve ping failed ({url}): {exc}", file=sys.stderr)
         return 1
     return 0
+
+
+def check_serve(settings: Settings | None = None, *, ping_url: str | None = None) -> int:
+    """Container health for qsbk-serve: HTTP liveness only.
+
+    Kafka/Mongo are validated by preflight and the subscriber healthcheck.
+    A full dependency probe here routinely exceeds the 10s compose timeout.
+    """
+    _ = settings
+    return check_serve_liveness(ping_url=ping_url)
+
+
+def check_serve_deps(settings: Settings | None = None, *, ping_url: str | None = None) -> int:
+    """Deep probe: Kafka + Mongo + HTTP ping (manual / troubleshooting)."""
+    if check_subscriber(settings) != 0:
+        return 1
+    return check_serve_liveness(ping_url=ping_url)
 
 
 def check_scraper(settings: Settings | None = None) -> int:
@@ -88,6 +113,8 @@ def main() -> int:
         return check_subscriber()
     if mode == "serve":
         return check_serve()
+    if mode == "serve-deps":
+        return check_serve_deps()
     if mode == "scraper":
         return check_scraper()
     print(f"Unknown mode: {mode}", file=sys.stderr)

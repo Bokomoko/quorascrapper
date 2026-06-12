@@ -76,6 +76,19 @@ class Settings:
     max_results: int = field(
         default_factory=lambda: int(os.environ.get("MAX_RESULTS", "16000"))
     )
+
+    scrape_mode: str = field(
+        default_factory=lambda: os.environ.get("SCRAPE_MODE", "scroll").lower()
+    )
+    graphql_page_size: int = field(
+        default_factory=lambda: int(os.environ.get("GRAPHQL_PAGE_SIZE", "20"))
+    )
+    answers_query_hash: str = field(
+        default_factory=lambda: os.environ.get(
+            "QUORA_ANSWERS_QUERY_HASH",
+            "0c7ab9ef87775512e02d48001ab55778e196125cf361e0e351d4eb5c8d8cac3a",
+        )
+    )
     scroll_pause: float = field(
         default_factory=lambda: float(os.environ.get("SCROLL_PAUSE", "1.5"))
     )

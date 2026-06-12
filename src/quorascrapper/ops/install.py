@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -15,21 +16,54 @@ INSTALL_DIR = Path.home() / ".local" / "share" / "qsbk" / "chrome-extension"
 BUNDLE_NAME = "bundled_extension"
 
 
+def _extension_version(path: Path) -> tuple[int, ...]:
+    try:
+        raw = json.loads((path / "manifest.json").read_text(encoding="utf-8"))["version"]
+        return tuple(int(part) for part in str(raw).split("."))
+    except (KeyError, TypeError, ValueError, OSError):
+        return (0,)
+
+
+def _repo_extension_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    env_dir = os.environ.get("QSBK_EXTENSION_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+    here = Path(__file__).resolve()
+    candidates.append(here.parents[3] / "extension")
+    candidates.append(Path.cwd() / "extension")
+    candidates.append(Path.home() / "src" / "projects" / "quorascrapper" / "extension")
+
+    seen: set[Path] = set()
+    found: list[Path] = []
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.is_dir() and (resolved / "manifest.json").is_file():
+            found.append(resolved)
+    return found
+
+
 def extension_source_dir() -> Path:
-    """Bundled extension (wheel) or repo ``extension/`` when developing."""
+    """Newest extension among bundled wheel copy and local repo checkouts."""
+    sources: list[Path] = []
     bundled = files("quorascrapper").joinpath(BUNDLE_NAME)
     if bundled.is_dir():
-        return Path(str(bundled))
+        sources.append(Path(str(bundled)))
+    sources.extend(_repo_extension_candidates())
 
-    # Editable / src checkout: repo_root/extension
-    repo_guess = Path(__file__).resolve().parents[3] / "extension"
-    if repo_guess.is_dir() and (repo_guess / "manifest.json").is_file():
-        return repo_guess
+    if not sources:
+        raise FileNotFoundError(
+            "Chrome extension files not found in the installed package. "
+            "Reinstall with: uv tool install --force /path/to/quorascrapper"
+        )
 
-    raise FileNotFoundError(
-        "Chrome extension files not found in the installed package. "
-        "Reinstall with: uv tool install --force /path/to/quorascrapper"
-    )
+    return max(sources, key=_extension_version)
 
 
 def install_extension(target: Path | None = None, *, serve_url: str | None = None) -> Path:
@@ -144,8 +178,11 @@ def _open_chrome_extensions() -> bool:
     return False
 
 
-def print_install_instructions(dest: Path) -> None:
-    print(f"Extension copied to:\n  {dest}\n")
+def print_install_instructions(dest: Path, *, source: Path | None = None) -> None:
+    version = ".".join(str(n) for n in _extension_version(dest))
+    src = source or extension_source_dir()
+    print(f"Extension v{version} copied to:\n  {dest}\n")
+    print(f"Source: {src}\n")
     print("Option A — load via Chrome UI (persists in your profile):")
     print("  1. Open chrome://extensions")
     print("  2. Enable Developer mode")
@@ -188,12 +225,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        source = extension_source_dir()
         dest = install_extension(args.dir, serve_url=args.serve_url)
     except FileNotFoundError as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
-    print_install_instructions(dest)
+    print_install_instructions(dest, source=source)
 
     if args.load:
         ok, msg = launch_chrome_with_extension(dest)

@@ -71,6 +71,25 @@ def test_launch_chrome_with_extension_spawns(tmp_path):
     assert args[1].startswith("--load-extension=")
 
 
+def test_extension_source_dir_prefers_newer_repo(tmp_path, monkeypatch):
+    bundled = tmp_path / "bundled"
+    bundled.mkdir()
+    (bundled / "manifest.json").write_text('{"version": "0.9.6"}', encoding="utf-8")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "manifest.json").write_text('{"version": "0.9.8"}', encoding="utf-8")
+
+    class FakeFiles:
+        def joinpath(self, name):
+            return bundled
+
+    monkeypatch.setattr(install_mod, "files", lambda _pkg: FakeFiles())
+    monkeypatch.setattr(install_mod, "_repo_extension_candidates", lambda: [repo])
+
+    assert install_mod.extension_source_dir() == repo
+
+
 def test_qsbk_install_subcommand():
     from quorascrapper.cli import main
 

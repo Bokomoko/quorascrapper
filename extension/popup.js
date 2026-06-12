@@ -4,9 +4,11 @@
   var SERVE_HEALTH = "";
   var SERVE_CHECK = "";
   var SERVE_UPSERT = "";
+  var SERVE_KNOWN = "";
   var HEALTH_POLL_MS = 4000;
   var embedded = /[?&]embedded=1/.test(location.search);
   var PROFILE_CACHE_KEY = "profileStatsCache";
+  var PROFILE_CURSOR_KEY = "qsbkProfileCursor";
   var PROFILE_CACHE_TTL_MS = 60 * 60 * 1000;
 
   function toCsv(rows) {
@@ -43,6 +45,26 @@
     );
   }
 
+  // Keep request bodies well under serve's 10MB cap. Full-content rows
+  // (answer_text) are published in modest batches; classification only needs URLs.
+  var SERVE_BATCH = 100;
+
+  function chunk(arr, size) {
+    var out = [];
+    for (var i = 0; i < arr.length; i += size) {
+      out.push(arr.slice(i, i + size));
+    }
+    return out;
+  }
+
+  function rowsForCheck(rows) {
+    return rows.map(function (row) {
+      var out = { url: row.answer_url || row.url };
+      if (row.seen_at) out.seen_at = row.seen_at;
+      return out;
+    });
+  }
+
   function rowsForServe(rows) {
     return rows.map(function (row) {
       var out = { url: row.answer_url || row.url };
@@ -50,6 +72,13 @@
       if (row.question_url) out.question_url = row.question_url;
       if (row.answer_preview) out.answer_preview = row.answer_preview;
       if (row.seen_at) out.seen_at = row.seen_at;
+      // Richer fields from the GraphQL method (absent in scroll mode).
+      if (row.aid) out.aid = row.aid;
+      if (row.answer_text) out.answer_text = row.answer_text;
+      if (row.num_upvotes != null) out.num_upvotes = row.num_upvotes;
+      if (row.num_views != null) out.num_views = row.num_views;
+      if (row.num_comments != null) out.num_comments = row.num_comments;
+      if (row.creation_time != null) out.creation_time = row.creation_time;
       return out;
     });
   }
@@ -91,7 +120,7 @@
 
   function formatCount(n) {
     if (n == null || isNaN(n)) return "—";
-    return String(n);
+    return Number(n).toLocaleString();
   }
 
   function sleep(ms) {
@@ -103,6 +132,8 @@
   var statusEl = document.getElementById("status");
   var maxEl = document.getElementById("max");
   var outputEl = document.getElementById("output");
+  var methodEl = document.getElementById("method");
+  var forceEl = document.getElementById("force");
   var startBtn = document.getElementById("start");
   var sessionPanel = document.getElementById("session-panel");
   var sessionElapsed = document.getElementById("session-elapsed");
@@ -118,23 +149,81 @@
   var targetTabId = null;
   var serveAvailable = false;
   var healthPollId = null;
+  var contextDead = false;
+
+  // After the extension is reloaded/updated, this in-page panel iframe is
+  // orphaned: chrome.runtime.id goes undefined and any chrome.* call throws
+  // "Extension context invalidated". Detect that, stop our timers, and tell the
+  // user to refresh — instead of spamming the console from interval callbacks.
+  function extensionAlive() {
+    try {
+      return !!(chrome && chrome.runtime && chrome.runtime.id);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function isContextInvalidated(err) {
+    var msg = (err && (err.message || err)) || "";
+    return /Extension context invalidated|context invalidated|message port closed/i.test(
+      String(msg)
+    );
+  }
+
+  function handleDeadContext() {
+    if (contextDead) return;
+    contextDead = true;
+    if (typeof healthPollId === "number") {
+      clearInterval(healthPollId);
+      healthPollId = null;
+    }
+    try {
+      setStatus("Extension was reloaded — refresh this Quora tab to reconnect.");
+    } catch (e) {
+      /* DOM may be gone too */
+    }
+  }
 
   var profileState = {
     total: null,
+    saved: null,
     fetchPromise: null,
   };
 
   var session = {
     active: false,
     startedAt: null,
+    collectingSince: null,
+    scrapeElapsedMs: null,
     intervalId: null,
     found: 0,
+    scrolled: 0,
     max: 100,
     recovering: false,
+    resumePending: false,
     newCount: null,
     skippedCount: null,
     skippedMongo: null,
   };
+
+  function sessionProcessed() {
+    return session.found + (session.scrolled || 0);
+  }
+
+  function sessionRateElapsedMs() {
+    if (session.scrapeElapsedMs != null) return session.scrapeElapsedMs;
+    if (session.collectingSince != null) return Date.now() - session.collectingSince;
+    if (session.startedAt != null) return Date.now() - session.startedAt;
+    return 0;
+  }
+
+  function sessionNewRate() {
+    return formatRate(session.found, sessionRateElapsedMs());
+  }
+
+  function sessionThroughputRate() {
+    return formatRate(sessionProcessed(), sessionRateElapsedMs());
+  }
 
   var classifyTimer = null;
   var classifyInFlight = false;
@@ -170,6 +259,9 @@
     if (meta.stop_reason === "pagination_stuck") {
       return " Pagination stuck — scroll manually, then scrape again.";
     }
+    if (meta.stop_reason === "resume_not_found") {
+      return " Resume marker not found — continued from top (reload /answers if stuck).";
+    }
     if (meta.stop_reason === "max_reached") return "";
     return " Stopped: " + meta.stop_reason + ".";
   }
@@ -187,9 +279,13 @@
   function resetSessionUI() {
     session.active = false;
     session.startedAt = null;
+    session.collectingSince = null;
+    session.scrapeElapsedMs = null;
     session.found = 0;
+    session.scrolled = 0;
     session.max = parseInt(maxEl.value, 10) || 100;
     session.recovering = false;
+    session.resumePending = false;
     session.newCount = null;
     session.skippedCount = null;
     session.skippedMongo = null;
@@ -199,7 +295,7 @@
     }
     sessionPanel.classList.remove("active");
     sessionElapsed.textContent = "0:00";
-    sessionDetail.textContent = "0 / " + session.max + " · 0.0 answers/min";
+    sessionDetail.textContent = "0 new / " + session.max + " · 0.0/min";
     sessionStarted.textContent = "";
     if (sessionEta) sessionEta.textContent = "";
     renderDedupeLine();
@@ -210,6 +306,7 @@
     session.skippedCount = report.skipped_count || 0;
     session.skippedMongo = report.skipped_mongo || 0;
     renderDedupeLine();
+    if (session.active) renderProfilePanel(false);
   }
 
   function answerSlug(url) {
@@ -250,20 +347,25 @@
   function renderSession() {
     if (!session.active || !session.startedAt) return;
     var elapsed = Date.now() - session.startedAt;
+    var rateElapsed = sessionRateElapsedMs();
     sessionElapsed.textContent = formatDuration(elapsed);
-    sessionDetail.textContent =
+    var rateLabel = session.scrolled > 0 ? sessionThroughputRate() : sessionNewRate();
+    var detail =
       session.found +
-      " / " +
+      " new / " +
       session.max +
       " · " +
-      formatRate(session.found, elapsed) +
-      " answers/min" +
-      (session.recovering ? " · recovering…" : "");
+      rateLabel +
+      "/min";
+    if (session.scrolled > 0) detail += " · " + formatCount(session.scrolled) + " skipped";
+    if (session.resumePending) detail += " · seeking resume…";
+    if (session.recovering) detail += " · recovering…";
+    sessionDetail.textContent = detail;
     if (sessionEta) {
       sessionEta.textContent =
         session.found >= session.max
           ? "ETA now"
-          : "ETA " + formatEta(session.found, session.max, elapsed);
+          : "ETA " + formatEta(session.found, session.max, rateElapsed);
     }
   }
 
@@ -271,7 +373,10 @@
     resetSessionUI();
     session.active = true;
     session.startedAt = Date.now();
+    session.collectingSince = null;
+    session.scrapeElapsedMs = null;
     session.found = 0;
+    session.scrolled = 0;
     session.max = maxResults;
     session.recovering = false;
     if (liveClassifyEnabled()) {
@@ -303,24 +408,20 @@
     renderSession();
   }
 
-  function sessionSummary(found) {
+  function sessionSummary() {
     if (!session.startedAt) return "";
-    var elapsed = Date.now() - session.startedAt;
-    return (
-      " · session " +
-      formatDuration(elapsed) +
-      " · " +
-      formatRate(found, elapsed) +
-      " answers/min"
-    );
+    var elapsed = session.scrapeElapsedMs != null ? session.scrapeElapsedMs : Date.now() - session.startedAt;
+    var rate = session.scrolled > 0 ? sessionThroughputRate() : sessionNewRate();
+    return " · session " + formatDuration(elapsed) + " · " + rate + " answers/min";
   }
 
   function scheduleLiveClassify(rows) {
+    if (contextDead || !extensionAlive()) return;
     if (!liveClassifyEnabled() || !rows || !rows.length || !session.active) return;
     if (classifyTimer) clearTimeout(classifyTimer);
     classifyTimer = setTimeout(function () {
       classifyTimer = null;
-      if (classifyInFlight || !session.active) return;
+      if (classifyInFlight || !session.active || contextDead) return;
       classifyInFlight = true;
       checkAnswersWithServe(rows)
         .then(function (report) {
@@ -328,7 +429,11 @@
           renderSession();
         })
         .catch(function (err) {
-          console.warn("[qsbk] live classify:", err.message || err);
+          if (isContextInvalidated(err)) {
+            handleDeadContext();
+          } else {
+            console.warn("[qsbk] live classify:", err.message || err);
+          }
         })
         .finally(function () {
           classifyInFlight = false;
@@ -338,15 +443,59 @@
 
   chrome.runtime.onMessage.addListener(function (msg) {
     if (msg.type !== "progress" || !session.active) return;
-    session.found = msg.found || 0;
+    session.found = msg.newFound != null ? msg.newFound : msg.found || 0;
+    session.scrolled = msg.scrolled || 0;
     session.recovering = !!msg.recovering;
+    session.resumePending = !!msg.resumePending;
+    if (!session.resumePending && !session.collectingSince) {
+      session.collectingSince = Date.now();
+    }
     renderSession();
-    setStatus(session.recovering ? "Pagination slow — nudging scroll…" : "Collecting answers…");
+    if (session.resumePending) {
+      setStatus("Fast-scrolling to last saved answer…");
+    } else if (session.recovering) {
+      setStatus("Pagination slow — nudging scroll…");
+    } else {
+      setStatus("Collecting new answers…");
+    }
     if (msg.rows && msg.rows.length) scheduleLiveClassify(msg.rows);
   });
 
   function isAnswersPage(url) {
     return !!(url && url.indexOf("quora.com") !== -1 && url.indexOf("/answers") !== -1);
+  }
+
+  function readProfileCursor(profileUrl) {
+    return new Promise(function (resolve) {
+      chrome.storage.local.get([PROFILE_CURSOR_KEY], function (data) {
+        var cursors = (data && data[PROFILE_CURSOR_KEY]) || {};
+        resolve(cursors[profileUrl] || null);
+      });
+    });
+  }
+
+  function clearProfileCursor(profileUrl) {
+    if (!profileUrl) return;
+    chrome.storage.local.get([PROFILE_CURSOR_KEY], function (data) {
+      var cursors = (data && data[PROFILE_CURSOR_KEY]) || {};
+      delete cursors[profileUrl];
+      var out = {};
+      out[PROFILE_CURSOR_KEY] = cursors;
+      chrome.storage.local.set(out);
+    });
+  }
+
+  function writeProfileCursor(profileUrl, deepestUrl, deepestKey) {
+    if (!profileUrl || !deepestUrl) return;
+    chrome.storage.local.get([PROFILE_CURSOR_KEY], function (data) {
+      var cursors = (data && data[PROFILE_CURSOR_KEY]) || {};
+      cursors[profileUrl] = {
+        afterUrl: deepestUrl,
+        afterKey: deepestKey || answerSlug(deepestUrl),
+        updatedAt: Date.now(),
+      };
+      chrome.storage.local.set({ qsbkProfileCursor: cursors });
+    });
   }
 
   function profileUrlFromAnswers(url) {
@@ -421,30 +570,51 @@
 
   function applyProfileTotalToMax() {
     if (profileState.total == null || isNaN(profileState.total)) return;
-    var n = Math.max(1, Math.min(5000, Math.floor(profileState.total)));
+    var n = Math.max(1, Math.floor(profileState.total));
     maxEl.value = String(n);
     setStatus("Max set to " + n + " (profile total)");
   }
 
-  function setProfileTotalDisplay(total, loading) {
+  function profileSavedDisplay() {
+    if (!serveAvailable) return null;
+    if (session.active && session.skippedCount != null) return session.skippedCount;
+    return profileState.saved;
+  }
+
+  function renderProfilePanel(loading) {
     profilePanel.classList.add("visible");
-    if (loading) {
+    if (loading && profileState.total == null) {
       profileTotalEl.textContent = "Profile answer count…";
       return;
     }
-    if (total != null) {
-      profileTotalEl.innerHTML =
-        'Profile total: <span class="profile-total-num" title="Click to set max answers">' +
-        formatCount(total) +
-        "</span> answers";
+    var chunks = [];
+    if (profileState.total != null) {
+      chunks.push(
+        '<span class="profile-total-num" title="Click to set max answers">' +
+          formatCount(profileState.total) +
+          "</span> on Quora"
+      );
+    } else if (!loading) {
+      chunks.push("Profile count unavailable");
+    }
+    var saved = profileSavedDisplay();
+    if (serveAvailable) {
+      var savedText = saved != null ? formatCount(saved) + " saved" : "… saved";
+      chunks.push(
+        '<span class="profile-saved" title="Already in MongoDB">' + savedText + "</span>"
+      );
+    }
+    if (!chunks.length) {
+      profileTotalEl.textContent = loading ? "Profile answer count…" : "—";
       return;
     }
-    profileTotalEl.textContent = "Profile answer count unavailable";
+    profileTotalEl.innerHTML = chunks.join(" · ");
   }
 
   function hideProfilePanel() {
     profilePanel.classList.remove("visible");
     profileState.total = null;
+    profileState.saved = null;
   }
 
   function readProfileCache(profileUrl) {
@@ -488,16 +658,16 @@
     var cached = await readProfileCache(profileUrl);
     if (cached != null) {
       profileState.total = cached;
-      setProfileTotalDisplay(cached, false);
+      renderProfilePanel(false);
       return cached;
     }
 
-    setProfileTotalDisplay(null, true);
+    renderProfilePanel(true);
     var fromActive = await readStatsFromTab(tab.id);
     if (fromActive != null) {
       profileState.total = fromActive;
       writeProfileCache(profileUrl, fromActive);
-      setProfileTotalDisplay(fromActive, false);
+      renderProfilePanel(false);
       return fromActive;
     }
 
@@ -510,7 +680,7 @@
       if (total != null) {
         profileState.total = total;
         writeProfileCache(profileUrl, total);
-        setProfileTotalDisplay(total, false);
+        renderProfilePanel(false);
         return total;
       }
     } catch (e) {
@@ -524,7 +694,7 @@
         }
       }
     }
-    setProfileTotalDisplay(null, false);
+    renderProfilePanel(false);
     return null;
   }
 
@@ -546,6 +716,34 @@
     SERVE_HEALTH = urls.ping;
     SERVE_CHECK = urls.check;
     SERVE_UPSERT = urls.upsert;
+    SERVE_KNOWN = urls.known;
+  }
+
+  async function fetchKnownCount() {
+    if (!SERVE_KNOWN) return null;
+    try {
+      var response = await fetch(SERVE_KNOWN, { cache: "no-store" });
+      if (!response.ok) return null;
+      var data = await response.json();
+      return data && typeof data.count === "number" ? data.count : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function refreshProfileSaved() {
+    if (!serveAvailable) {
+      if (!session.active) profileState.saved = null;
+      renderProfilePanel(false);
+      return;
+    }
+    if (session.active && session.skippedCount != null) {
+      renderProfilePanel(false);
+      return;
+    }
+    var count = await fetchKnownCount();
+    if (count != null) profileState.saved = count;
+    renderProfilePanel(false);
   }
 
   function loadServeConfig(cb) {
@@ -592,28 +790,64 @@
     }
   }
 
-  async function checkAnswersWithServe(rows) {
-    var response = await fetch(SERVE_CHECK, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      cache: "no-store",
-      body: JSON.stringify({ answers: rowsForServe(rows) }),
-    });
-    var body = {};
-    try {
-      body = await response.json();
-    } catch (e) {
-      /* ignore */
+  async function checkAnswersWithServe(rows, force) {
+    var batches = chunk(rowsForCheck(rows), SERVE_BATCH);
+    var merged = {
+      new_count: 0,
+      skipped_count: 0,
+      skipped_mongo: 0,
+      new: [],
+      skipped_urls: [],
+    };
+    for (var i = 0; i < batches.length; i++) {
+      var response = await fetch(SERVE_CHECK, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ answers: batches[i], force: !!force }),
+      });
+      var body = {};
+      try {
+        body = await response.json();
+      } catch (e) {
+        /* ignore */
+      }
+      if (!response.ok) {
+        throw new Error(body.error || "Serve check failed (" + response.status + ")");
+      }
+      merged.new_count += body.new_count || 0;
+      merged.skipped_count += body.skipped_count || 0;
+      merged.skipped_mongo += body.skipped_mongo || 0;
+      if (body.new && body.new.length) merged.new = merged.new.concat(body.new);
+      if (body.skipped_urls && body.skipped_urls.length) {
+        merged.skipped_urls = merged.skipped_urls.concat(body.skipped_urls);
+      }
     }
-    if (!response.ok) {
-      throw new Error(body.error || "Serve check failed (" + response.status + ")");
-    }
-    console.info("[qsbk] POST /check", rows.length, "in →", body.new_count, "new,", body.skipped_count, "skipped");
-    return body;
+    console.info(
+      "[qsbk] POST /check",
+      rows.length,
+      "in (" + batches.length + " batch(es)) →",
+      merged.new_count,
+      "new,",
+      merged.skipped_count,
+      "skipped"
+    );
+    return merged;
   }
 
   async function refreshServeHealth() {
-    updateServeAvailability(await checkServeHealth());
+    if (contextDead) return;
+    if (!extensionAlive()) {
+      handleDeadContext();
+      return;
+    }
+    try {
+      updateServeAvailability(await checkServeHealth());
+      await refreshProfileSaved();
+    } catch (err) {
+      if (isContextInvalidated(err)) handleDeadContext();
+      else throw err;
+    }
   }
 
   function startServeHealthPoll() {
@@ -629,33 +863,52 @@
     }
   }
 
-  async function publishNewToKafka(newRows) {
+  async function publishNewToKafka(newRows, force) {
     if (!newRows.length) {
       return { published: 0, skipped: 0, skipped_mongo: 0 };
     }
-    return sendToKafka(newRows);
+    return sendToKafka(newRows, force);
   }
 
-  async function sendToKafka(rows) {
-    var payload = rowsForServe(rows);
-    console.info("[qsbk] POST /upsert", payload.length, "new answers");
-    var response = await fetch(SERVE_UPSERT, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      cache: "no-store",
-      body: JSON.stringify({ answers: payload }),
-    });
-    var body = {};
-    try {
-      body = await response.json();
-    } catch (e) {
-      /* ignore */
+  async function sendToKafka(rows, force) {
+    var batches = chunk(rowsForServe(rows), SERVE_BATCH);
+    var totals = { published: 0, skipped: 0, skipped_mongo: 0, urls: [] };
+    console.info(
+      "[qsbk] POST /upsert",
+      rows.length,
+      "answers in",
+      batches.length,
+      "batch(es)",
+      force ? "(force)" : ""
+    );
+    for (var i = 0; i < batches.length; i++) {
+      var response = await fetch(SERVE_UPSERT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ answers: batches[i], force: !!force }),
+      });
+      var body = {};
+      try {
+        body = await response.json();
+      } catch (e) {
+        /* ignore */
+      }
+      if (!response.ok) {
+        throw new Error(body.error || "qsbk serve returned " + response.status);
+      }
+      totals.published += body.published || 0;
+      totals.skipped += body.skipped || 0;
+      totals.skipped_mongo += body.skipped_mongo || 0;
+      if (body.urls && body.urls.length) totals.urls = totals.urls.concat(body.urls);
+      if (session.active) {
+        setStatus(
+          "Publishing… " + totals.published + "/" + rows.length + " sent to Kafka"
+        );
+      }
     }
-    if (!response.ok) {
-      throw new Error(body.error || "qsbk serve returned " + response.status);
-    }
-    console.info("[qsbk] /upsert response", body);
-    return body;
+    console.info("[qsbk] /upsert done", totals);
+    return totals;
   }
 
   profileTotalEl.addEventListener("click", function (ev) {
@@ -717,9 +970,16 @@
       await ensureScraper(tab.id);
       setStatus("Collecting answers…");
 
+      var method = methodEl && methodEl.value === "scroll" ? "scroll" : "graphql";
+      var force = !!(forceEl && forceEl.checked);
+      var profileUrl = profileUrlFromAnswers(tab.url);
+      var cursor = profileUrl ? await readProfileCursor(profileUrl) : null;
       var response = await chrome.tabs.sendMessage(tab.id, {
         type: "startScrape",
+        mode: method,
         maxResults: maxResults,
+        skipKnown: serveAvailable && !force,
+        resumeAfterKey: force ? null : cursor && cursor.afterKey ? cursor.afterKey : null,
       });
 
       if (!response || !response.ok) {
@@ -730,19 +990,42 @@
       var rows = response.rows || [];
       var meta = response.meta || {};
       session.found = rows.length;
+      session.scrolled = meta.skipped_known || session.scrolled || 0;
+      session.scrapeElapsedMs = sessionRateElapsedMs();
       renderSession();
 
       if (!rows.length) {
-        setStatus("No answers found. Are you logged in?" + sessionSummary(0));
+        if (meta.stop_reason === "resume_not_found" && profileUrl) {
+          clearProfileCursor(profileUrl);
+        }
+        if (meta.skipped_known > 0 || meta.stop_reason === "pagination_stuck") {
+          setStatus(
+            "No new answers this run — scrolled " +
+              formatCount(meta.skipped_known || 0) +
+              " saved, pagination stalled." +
+              stopReasonHint(meta) +
+              sessionSummary() +
+              " Reload /answers, scroll manually, then scrape again."
+          );
+        } else {
+          setStatus("No answers found. Are you logged in?" + sessionSummary());
+        }
         return;
       }
 
-      var elapsedMs = Date.now() - session.startedAt;
+      if (meta.stop_reason === "resume_not_found" && profileUrl) {
+        clearProfileCursor(profileUrl);
+      }
+
+      var elapsedMs = session.scrapeElapsedMs;
       meta.session_started_at = new Date(session.startedAt).toISOString();
       meta.session_elapsed_ms = elapsedMs;
       meta.session_elapsed_human = formatDuration(elapsedMs);
-      meta.session_answers_per_minute = parseFloat(formatRate(rows.length, elapsedMs));
+      meta.session_answers_per_minute = parseFloat(
+        session.scrolled > 0 ? sessionThroughputRate() : sessionNewRate()
+      );
       meta.session_collected = rows.length;
+      meta.session_skipped_known = session.scrolled;
       meta.session_max = maxResults;
 
       var exportRows = rows;
@@ -755,7 +1038,7 @@
 
       if (serveAvailable || output === "kafka") {
         setStatus("Checking answers with qsbk serve…");
-        classify = await checkAnswersWithServe(rows);
+        classify = await checkAnswersWithServe(rows, force);
         applyClassifyReport(classify);
         exportRows = rowsMatchingNew(rows, classify.new || []);
         meta.session_new_count = classify.new_count;
@@ -779,12 +1062,13 @@
       } else if (output === "kafka") {
         if (exportRows.length) {
           setStatus("Sending " + exportRows.length + " new answers to Kafka…");
-          var publishReport = await publishNewToKafka(exportRows);
+          var publishReport = await publishNewToKafka(exportRows, force);
           if (publishReport.published != null) {
             meta.session_new_count = publishReport.published;
             session.newCount = publishReport.published;
             renderDedupeLine();
           }
+          await refreshProfileSaved();
         }
         destLabel =
           "Kafka (" +
@@ -794,12 +1078,26 @@
           " skipped)";
       }
 
+      if (
+        profileUrl &&
+        meta.deepest_url &&
+        rows.length > 0 &&
+        meta.stop_reason !== "pagination_stuck"
+      ) {
+        writeProfileCursor(profileUrl, meta.deepest_url, meta.deepest_key);
+      }
+
+      var collectedLabel =
+        meta.skip_known && meta.skipped_known
+          ? rows.length + " new (" + formatCount(meta.skipped_known) + " already saved, skipped)"
+          : rows.length + " collected";
+
       setStatus(
         "Session done — " +
-          rows.length +
-          " collected → " +
+          collectedLabel +
+          " → " +
           destLabel +
-          sessionSummary(rows.length) +
+          sessionSummary() +
           stopReasonHint(meta)
       );
 
@@ -818,6 +1116,7 @@
         classifyTimer = null;
       }
       endSession();
+      await refreshProfileSaved();
       startBtn.disabled = false;
     }
   });

@@ -189,9 +189,14 @@
     });
   }
 
+  function scrapeRunning() {
+    return !!window.__qsbkScrapeRunning;
+  }
+
   function startPolling() {
     if (pollTimer) return;
     pollTimer = setInterval(function () {
+      if (scrapeRunning()) return;
       refreshMarks().then(function (result) {
         if (!result.ok && cachedIndex) {
           markKnownOnPage(cachedIndex);
@@ -204,7 +209,7 @@
     if (!window.MutationObserver) return;
     var pending = false;
     var observer = new MutationObserver(function () {
-      if (pending || !cachedIndex) return;
+      if (scrapeRunning() || pending || !cachedIndex) return;
       pending = true;
       requestAnimationFrame(function () {
         pending = false;
