@@ -121,23 +121,81 @@ uv run quora-subscriber
 
 ## Container deployment
 
-Uses host networking (required for LAN Kafka DNS).
+Backend stack (**serve + subscriber**) runs on **bokomint** (Linux). The Chrome extension on your Mac talks to `http://bokomint.local:8765`. Both services use host networking so they reach Kafka on the same host.
+
+### Remote (bokomint)
+
+One-time on bokomint:
 
 ```bash
-# Subscriber stack (preflight → subscriber)
-./podman_subscriber.sh up
-./podman_subscriber.sh logs
+ssh bokomint.local
+mkdir -p ~/quorascrapper
+cd ~/quorascrapper
+cp .env.example .env.container
+# KAFKA_BOOTSTRAP=127.0.0.1:19092
+# MONGODB_URI=...
+```
 
-# On-demand scraper
-./podman_scraper.sh run --sender kafka
+From your Mac (sync + start):
+
+```bash
+./deploy_bokomint.sh up
+./deploy_bokomint.sh logs
+./deploy_bokomint.sh status
+./deploy_bokomint.sh down
+```
+
+Install extension pointing at bokomint:
+
+```bash
+# Reinstall CLI first if --serve-url is missing
+uv tool install --force /path/to/quorascrapper
+
+qsbk install --serve-url http://bokomint.local:8765
+# reload extension in chrome://extensions
+```
+
+If `curl http://bokomint.local:8765/ping` times out from the Mac, port 8765 is blocked on the LAN.
+Either open the firewall on bokomint:
+
+```bash
+ssh bokomint.local
+sudo ufw allow 8765/tcp
+```
+
+Or use an SSH tunnel (no firewall change):
+
+```bash
+./deploy_bokomint.sh tunnel   # leave running
+qsbk install --serve-url http://127.0.0.1:8765
+curl http://127.0.0.1:8765/ping
+```
+
+### Local (dev only)
+
+```bash
+cp .env.example .env.container   # KAFKA_BOOTSTRAP, MONGODB_URI
+
+# Start subscriber + qsbk serve (preflight first)
+./podman_qsbk.sh up
+./podman_qsbk.sh logs            # both
+./podman_qsbk.sh logs serve      # HTTP API only
+./podman_qsbk.sh status
 ```
 
 Or with compose directly:
 
 ```bash
 docker compose run --rm preflight
-docker compose up -d kafka-subscriber
-docker compose --profile scraper run --rm quora-scraper
+docker compose up -d kafka-subscriber qsbk-serve
+docker compose logs -f qsbk-serve kafka-subscriber
+```
+
+On-demand Selenium scraper (optional profile):
+
+```bash
+./podman_scraper.sh run --sender kafka
+# or: docker compose --profile scraper run --rm quora-scraper
 ```
 
 ## Configuration

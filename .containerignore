@@ -69,7 +69,6 @@ Dockerfile
 podman_subscriber.sh
 start_subscriber.sh
 
-# Environment files (will be mounted separately)
+# Environment files (mounted at runtime, not baked into image)
 .env
-.env.example
 .env.container

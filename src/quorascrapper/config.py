@@ -15,18 +15,27 @@ except Exception:
 
 
 def load_project_env() -> None:
-    """Merge .env, .env.container, and .env.scraper into os.environ."""
+    """Load env from global config, then project files in cwd (project wins)."""
     if dotenv_values is None:
         return
     from pathlib import Path
 
-    for name in (".env", ".env.container", ".env.scraper"):
-        path = Path(name)
-        if not path.exists():
-            continue
+    from quorascrapper.ops.config_cmd import config_paths
+
+    def merge_file(path: Path, *, override: bool) -> None:
+        if not path.is_file():
+            return
         for key, value in dotenv_values(path).items():
-            if value is not None:
-                os.environ.setdefault(key, value)
+            if value is None:
+                continue
+            if override or key not in os.environ:
+                os.environ[key] = value
+
+    for path in config_paths():
+        merge_file(path, override=False)
+
+    for name in (".env", ".env.container", ".env.scraper"):
+        merge_file(Path(name), override=True)
 
 _PLACEHOLDER_MARKERS = ("username:password", "your-connection", "secure_password")
 

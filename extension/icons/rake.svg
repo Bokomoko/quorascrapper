@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="qsbk rake">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#141b2d"/>
+      <stop offset="100%" stop-color="#243049"/>
+    </linearGradient>
+    <linearGradient id="rake" x1="20%" y1="0%" x2="80%" y2="100%">
+      <stop offset="0%" stop-color="#5eead4"/>
+      <stop offset="55%" stop-color="#22d3ee"/>
+      <stop offset="100%" stop-color="#0891b2"/>
+    </linearGradient>
+    <linearGradient id="handle" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#fcd34d"/>
+      <stop offset="100%" stop-color="#f59e0b"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="2.5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#bg)"/>
+  <rect width="128" height="128" rx="28" fill="none" stroke="#334155" stroke-width="1.5" opacity="0.6"/>
+  <!-- collected URL dots -->
+  <g opacity="0.9" filter="url(#glow)">
+    <circle cx="88" cy="34" r="3" fill="#67e8f9"/>
+    <circle cx="96" cy="48" r="2.5" fill="#5eead4"/>
+    <circle cx="82" cy="52" r="2" fill="#a5f3fc"/>
+    <circle cx="92" cy="62" r="2.5" fill="#22d3ee"/>
+  </g>
+  <!-- rake -->
+  <g transform="translate(64 68) rotate(-38)" filter="url(#glow)">
+    <!-- handle -->
+    <rect x="-5" y="8" width="10" height="52" rx="5" fill="url(#handle)"/>
+    <rect x="-3" y="10" width="6" height="48" rx="3" fill="#fde68a" opacity="0.35"/>
+    <!-- head -->
+    <rect x="-28" y="-8" width="56" height="18" rx="4" fill="url(#rake)"/>
+    <!-- tines -->
+    <g fill="url(#rake)">
+      <rect x="-24" y="10" width="5" height="22" rx="2.5"/>
+      <rect x="-13" y="10" width="5" height="26" rx="2.5"/>
+      <rect x="-2" y="10" width="5" height="26" rx="2.5"/>
+      <rect x="9" y="10" width="5" height="22" rx="2.5"/>
+      <rect x="20" y="10" width="5" height="18" rx="2.5"/>
+    </g>
+  </g>
+  <!-- subtle q mark / brand notch -->
+  <path d="M24 96 Q24 82 36 82 Q48 82 48 94 Q48 104 38 104 L42 112" fill="none" stroke="#64748b" stroke-width="3" stroke-linecap="round" opacity="0.5"/>
+</svg>

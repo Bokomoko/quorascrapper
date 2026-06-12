@@ -1,14 +1,13 @@
-import hashlib
 from typing import Any, Optional
+
+from quorascrapper.filter.core import url_hash
 
 
 class BaseSender:
     def send(self, obj: dict[str, Any]) -> None:
         url = obj.get("url")
         if url:
-            obj["hash"] = hashlib.blake2s(
-                str(url).encode("utf-8"), digest_size=16
-            ).hexdigest()
+            obj["hash"] = url_hash(str(url))
         self._send(obj)
 
     def _send(self, obj: dict[str, Any]) -> None:

@@ -46,7 +46,13 @@ class KafkaSender(BaseSender):
             "kafka_produce",
             extra={"event": "kafka_produce", "topic": self.topic, "size": len(payload)},
         )
-        self._producer.produce(self.topic, value=payload, callback=delivery_report)
+        key = obj.get("hash")
+        self._producer.produce(
+            self.topic,
+            key=str(key).encode("utf-8") if key else None,
+            value=payload,
+            callback=delivery_report,
+        )
         self._producer.poll(0)
 
     def flush(self, timeout: Optional[float] = None) -> None:

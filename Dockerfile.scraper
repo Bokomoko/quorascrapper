@@ -11,8 +11,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock README.md .env.example ./
 COPY src ./src
+COPY extension ./extension
 RUN uv sync --frozen --no-cache
 
 ENV CHROME_BINARY=/usr/bin/chromium \

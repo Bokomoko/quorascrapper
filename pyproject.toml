@@ -13,12 +13,14 @@ dependencies = [
 ]
 
 [project.scripts]
-qsbk = "quorascrapper.scraper.cli:main"
+qsbk = "quorascrapper.cli:main"
 quora-scraper = "quorascrapper.scraper.cli:main"
 quora-subscriber = "quorascrapper.subscriber.cli:main"
 quora-preflight = "quorascrapper.ops.preflight:main"
 quora-mongo-check = "quorascrapper.ops.mongo_check:main"
 quora-healthcheck = "quorascrapper.ops.healthcheck:main"
+quora-filter = "quorascrapper.filter.cli:main"
+quora-serve = "quorascrapper.ops.serve:main"
 
 [project.urls]
 Repository = "https://github.com/bokomoko/quorascrapper"
@@ -37,9 +39,14 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/quorascrapper"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"extension" = "quorascrapper/bundled_extension"
+".env.example" = "quorascrapper/env.example"
+
 [tool.hatch.build.targets.sdist]
 include = [
     "/src",
+    "/extension",
     "/pyproject.toml",
     "/README.md",
     "/uv.lock",

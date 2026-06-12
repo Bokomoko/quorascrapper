@@ -20,6 +20,7 @@ from quorascrapper.scraper.stats import (
     compute_answer_limit,
     extract_profile_stats,
 )
+from quorascrapper.selectors import ANSWER_ANCHOR_XPATH, INITIAL_ANSWER_WAIT_SECONDS
 
 try:
     from selenium.common.exceptions import StaleElementReferenceException, WebDriverException
@@ -93,6 +94,14 @@ class QuoraScraper:
             time.sleep(2)
             title = self.driver.title
             self.logger.info("Page loaded: title='%s'", title)
+
+            # Allow lazy-loaded answer list before login-wall heuristics.
+            try:
+                WebDriverWait(self.driver, INITIAL_ANSWER_WAIT_SECONDS).until(
+                    EC.presence_of_element_located((By.XPATH, ANSWER_ANCHOR_XPATH))
+                )
+            except Exception:
+                pass
 
             if detect_login_wall(self.driver, By, self.logger):
                 self.login_wall_detected = True

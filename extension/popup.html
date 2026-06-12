@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>qsbk</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 0;
+        min-width: 340px;
+        background: #fff;
+        user-select: none;
+      }
+      #drag-handle {
+        cursor: move;
+        padding: 10px 12px;
+        background: linear-gradient(#f3f4f6, #e5e7eb);
+        border-bottom: 1px solid #d1d5db;
+        font-size: 13px;
+        font-weight: 600;
+        color: #111827;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      #drag-handle.hidden {
+        display: none;
+      }
+      #panel-body {
+        padding: 12px;
+      }
+      label {
+        display: block;
+        margin-bottom: 10px;
+        font-size: 13px;
+      }
+      input[type="number"],
+      select {
+        width: 100%;
+        margin-top: 4px;
+        padding: 6px 8px;
+        font-size: 13px;
+      }
+      button {
+        width: 100%;
+        margin-top: 4px;
+        padding: 8px;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      #status {
+        margin-top: 10px;
+        font-size: 12px;
+        color: #444;
+        min-height: 2.5em;
+        line-height: 1.4;
+        user-select: text;
+      }
+      #session-panel {
+        display: none;
+        margin-top: 10px;
+        padding: 10px;
+        border: 1px solid #d1d5db;
+        border-radius: 8px;
+        background: #f9fafb;
+      }
+      #session-panel.active {
+        display: block;
+      }
+      #session-elapsed {
+        font-family: ui-monospace, monospace;
+        font-size: 28px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        color: #111827;
+        line-height: 1.1;
+      }
+      #session-detail {
+        margin-top: 6px;
+        font-size: 12px;
+        color: #374151;
+        line-height: 1.45;
+      }
+      #session-timing {
+        margin-top: 6px;
+        font-size: 11px;
+        color: #6b7280;
+        line-height: 1.5;
+      }
+      #profile-panel {
+        display: none;
+        margin-bottom: 10px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: #eff6ff;
+        border: 1px solid #bfdbfe;
+        font-size: 12px;
+        color: #1e3a8a;
+        line-height: 1.4;
+      }
+      #profile-panel.visible {
+        display: block;
+      }
+      #profile-total {
+        font-weight: 600;
+      }
+      .profile-total-num {
+        cursor: pointer;
+        text-decoration: underline;
+        text-decoration-style: dotted;
+        text-underline-offset: 2px;
+      }
+      .profile-total-num:hover {
+        color: #1d4ed8;
+      }
+      #session-dedupe {
+        margin-top: 6px;
+        font-size: 12px;
+        color: #1d4ed8;
+        line-height: 1.4;
+      }
+      #serve-status {
+        font-size: 11px;
+        margin: -4px 0 10px;
+        line-height: 1.35;
+      }
+      #serve-status.serve-online {
+        color: #047857;
+      }
+      #serve-status.serve-offline {
+        color: #b45309;
+      }
+      select option:disabled {
+        color: #9ca3af;
+      }
+      .hint {
+        font-size: 11px;
+        color: #666;
+        margin-top: 10px;
+        line-height: 1.35;
+        user-select: text;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="drag-handle">
+      qsbk <span id="ext-version"></span>
+      <span>drag to move</span>
+    </div>
+    <div id="panel-body">
+      <div id="profile-panel">
+        <span id="profile-total">Loading profile…</span>
+      </div>
+      <label>
+        Max answers (this session)
+        <input id="max" type="number" min="1" max="5000" value="100" />
+      </label>
+      <label>
+        Output
+        <select id="output">
+          <option value="kafka" selected>Kafka (via qsbk serve)</option>
+          <option value="json">JSON file download</option>
+          <option value="csv">CSV file download</option>
+        </select>
+      </label>
+      <div id="serve-status" class="serve-offline">Checking qsbk serve…</div>
+      <button id="start" type="button">Scrape this tab</button>
+      <div id="session-panel">
+        <div id="session-elapsed">0:00</div>
+        <div id="session-detail">0 / 100 · 0.0 answers/min</div>
+        <div id="session-dedupe"></div>
+        <div id="session-timing">
+          <div id="session-started"></div>
+          <div id="session-eta"></div>
+        </div>
+      </div>
+      <div id="status">Open a Quora profile <code>/answers</code> page (logged in).</div>
+      <p class="hint">
+        Drag the panel header on the page to move it. Dedupe checks Mongo via <code>qsbk serve</code>.<br />
+        Green ✓ badges poll <code>/known</code> every few seconds after ingest.
+      </p>
+    </div>
+    <script src="serve-config.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

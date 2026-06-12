@@ -13,15 +13,17 @@ from typing import Literal
 
 Runtime = Literal["macos", "linux", "linux_container", "windows", "unknown"]
 
-# Shared headless flags. macOS automation must NOT use the user's Google Chrome.app
-# (TransformProcessType / _RegisterApplication crash under chromedriver).
-_COMMON_ARGS = (
-    "--headless=new",
-    "--disable-gpu",
-    "--disable-extensions",
-    "--disable-default-apps",
-    "--remote-allow-origins=*",
-)
+def _chrome_base_args() -> tuple[str, ...]:
+    base = (
+        "--disable-gpu",
+        "--disable-extensions",
+        "--disable-default-apps",
+        "--remote-allow-origins=*",
+    )
+    if _truthy(os.environ.get("HEADLESS", "1")):
+        return ("--headless=new",) + base
+    return base
+
 
 _SYSTEM_CHROME_MACOS = (
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -217,7 +219,7 @@ class BrowserEnvironment:
 def detect_browser_environment(explicit_binary: str = "") -> BrowserEnvironment:
     runtime = detect_runtime()
     binary = resolve_browser_binary(explicit_binary or None, runtime)
-    args = _COMMON_ARGS + _RUNTIME_EXTRA_ARGS.get(runtime, ())
+    args = _chrome_base_args() + _RUNTIME_EXTRA_ARGS.get(runtime, ())
     return BrowserEnvironment(
         runtime=runtime,
         system=platform.system(),

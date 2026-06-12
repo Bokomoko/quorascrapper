@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "qsbk — Quora answer URL collector",
+  "version": "0.9.8",
+  "description": "Scroll a logged-in Quora /answers page, export CSV/JSON or send to Kafka via qsbk serve.",
+  "permissions": ["activeTab", "scripting", "storage", "tabs"],
+  "host_permissions": [
+    "*://*.quora.com/*",
+    "*://quora.com/*",
+    "http://127.0.0.1:8765/*",
+    "http://bokomint.local:8765/*",
+    "http://*.local:8765/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "qsbk — open control panel",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.quora.com/*", "*://quora.com/*"],
+      "js": ["serve-config.js", "scrape.js", "marks.js", "panel-shell.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["popup.html", "popup.js", "serve-config.js", "config.json"],
+      "matches": ["*://*.quora.com/*", "*://quora.com/*"]
+    }
+  ]
+}

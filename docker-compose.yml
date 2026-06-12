@@ -3,20 +3,22 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: quorascrapper-qsbk:latest
     env_file:
       - .env.container
-      - .env.scraper
     network_mode: host
-    command: ["uv", "run", "quora-preflight", "--mode", "all"]
+    command: ["uv", "run", "quora-preflight", "--mode", "subscriber"]
     restart: "no"
 
   kafka-subscriber:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: quora-kafka-subscriber
+    image: quorascrapper-qsbk:latest
+    container_name: qsbk-subscriber
     env_file:
       - .env.container
+    command: ["uv", "run", "qsbk", "subscriber"]
     restart: unless-stopped
     network_mode: host
     depends_on:
@@ -28,6 +30,32 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  qsbk-serve:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: quorascrapper-qsbk:latest
+    container_name: qsbk-serve
+    env_file:
+      - .env.container
+    command: ["uv", "run", "qsbk", "serve", "--host", "0.0.0.0", "--port", "8765"]
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      preflight:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "uv", "run", "quora-healthcheck", "serve"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     logging:
       driver: json-file
       options:

@@ -42,3 +42,5 @@ LOGIN_WALL_MARKERS = (
     "entrar",
     "iniciar sessão",
 )
+
+CLOUDFLARE_MARKERS = ("just a moment",)

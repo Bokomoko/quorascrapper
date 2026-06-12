@@ -87,16 +87,13 @@ class KafkaMongoSubscriber:
 
         try:
             upsert_answer(self.mongo_collection, data)
-            self.messages_stored += 1
-            return "stored"
         except PyMongoError as exc:
             logger.error("mongodb_error", extra={"event": "mongodb_error", "error": str(exc)})
             self.errors_count += 1
             return "retry"
-        except Exception as exc:
-            logger.error("unexpected_error", extra={"event": "unexpected_error", "error": str(exc)})
-            self.errors_count += 1
-            return "retry"
+
+        self.messages_stored += 1
+        return "stored"
 
     def consume_messages(self) -> None:
         logger.info("consumer_loop_start", extra={"event": "consumer_loop_start"})

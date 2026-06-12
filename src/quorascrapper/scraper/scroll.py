@@ -38,13 +38,15 @@ def scroll_to_bottom(
         else:
             stagnant_scrolls += 1
             new_height = driver.execute_script("return document.body.scrollHeight")
-            if new_height == last_height or stagnant_scrolls >= no_growth_threshold:
+            if new_height != last_height:
+                last_height = new_height
+                stagnant_scrolls = 0
+            elif stagnant_scrolls >= no_growth_threshold:
                 logger.info(
                     "Stopping scroll: plateau or no growth (%s stagnant)",
                     stagnant_scrolls,
                 )
                 break
-            last_height = new_height
 
         if current_content > last_processed_at_count:
             for anchor in anchors[last_processed_at_count:]:

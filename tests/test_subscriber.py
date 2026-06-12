@@ -23,7 +23,8 @@ def test_process_message_stores_valid_payload():
     sub = _make_subscriber()
     sub.mongo_collection.replace_one = MagicMock(return_value=MagicMock(upserted_id="abc"))
 
-    payload = json.dumps({"url": "https://example.com/answer/1", "hash": "abc123"})
+    url = "https://example.com/answer/1"
+    payload = json.dumps({"url": url, "hash": "abc123"})
     assert sub.process_message(payload) == "stored"
     assert sub.messages_stored == 1
 

@@ -10,6 +10,7 @@ from quorascrapper.selectors import (
     ANSWER_ANCHOR_XPATH,
     ANSWER_BLOCK_XPATHS,
     ANSWER_LINK_XPATHS,
+    CLOUDFLARE_MARKERS,
     INITIAL_ANSWER_WAIT_SECONDS,
     LOGIN_WALL_MARKERS,
 )
@@ -64,9 +65,17 @@ def process_anchor(
 def detect_login_wall(driver, By, logger: logging.Logger) -> bool:
     try:
         title = (driver.title or "").lower()
+        if any(m in title for m in CLOUDFLARE_MARKERS):
+            logger.warning("Cloudflare challenge suspected (title): %s", driver.title)
+            return True
         if any(m in title for m in LOGIN_WALL_MARKERS):
             logger.warning("Login wall suspected (title): %s", driver.title)
             return True
+
+        anchors = driver.find_elements(By.XPATH, ANSWER_ANCHOR_XPATH)
+        if anchors:
+            return False
+
         body = driver.find_element(By.TAG_NAME, "body").text.lower()[:2000]
         if any(m in body for m in LOGIN_WALL_MARKERS) and "/answer/" not in body:
             logger.warning("Login wall suspected in page body")

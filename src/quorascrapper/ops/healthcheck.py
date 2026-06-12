@@ -2,8 +2,12 @@
 
 import os
 import sys
+import urllib.error
+import urllib.request
 
 from quorascrapper.config import Settings
+
+DEFAULT_SERVE_PING = os.environ.get("QSBK_SERVE_PING_URL", "http://127.0.0.1:8765/ping")
 
 
 def check_subscriber(settings: Settings | None = None) -> int:
@@ -37,6 +41,22 @@ def check_subscriber(settings: Settings | None = None) -> int:
     return 0
 
 
+def check_serve(settings: Settings | None = None, *, ping_url: str | None = None) -> int:
+    """Kafka + Mongo deps, then HTTP ping for the local serve process."""
+    if check_subscriber(settings) != 0:
+        return 1
+    url = ping_url or DEFAULT_SERVE_PING
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            if resp.status != 200:
+                print(f"serve ping returned {resp.status}", file=sys.stderr)
+                return 1
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        print(f"serve ping failed ({url}): {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def check_scraper(settings: Settings | None = None) -> int:
     cfg = settings or Settings.from_env()
     try:
@@ -66,6 +86,8 @@ def main() -> int:
     )
     if mode == "subscriber":
         return check_subscriber()
+    if mode == "serve":
+        return check_serve()
     if mode == "scraper":
         return check_scraper()
     print(f"Unknown mode: {mode}", file=sys.stderr)

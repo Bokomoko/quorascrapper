@@ -9,6 +9,7 @@ from pymongo import ASCENDING, MongoClient  # type: ignore
 from pymongo.collection import Collection  # type: ignore
 
 from quorascrapper.config import Settings
+from quorascrapper.filter.core import answer_url_kind
 from quorascrapper.logging_setup import init_logging
 
 logger = init_logging("subscriber")
@@ -40,6 +41,19 @@ def build_document(data: dict[str, Any]) -> dict[str, Any]:
 
 def upsert_answer(collection: Collection, data: dict[str, Any]) -> bool:
     """Upsert document. Returns True on success, raises PyMongoError on transient failure."""
+    url = str(data.get("url") or "")
+    kind = answer_url_kind(url)
+    if kind == "question":
+        logger.warning(
+            "non_canonical_answer_url",
+            extra={"event": "non_canonical_answer_url", "url": url[:200], "kind": kind},
+        )
+    elif kind == "invalid":
+        logger.warning(
+            "invalid_answer_url",
+            extra={"event": "invalid_answer_url", "url": url[:200]},
+        )
+
     document = build_document(data)
     filter_key = (
         {"hash": data["hash"]} if "hash" in data else {"url": data.get("url")}

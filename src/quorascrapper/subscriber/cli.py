@@ -19,7 +19,7 @@ def signal_handler(signum, frame) -> None:
         sys.exit(0)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     global _active_subscriber
 
     import argparse
@@ -30,7 +30,7 @@ def main() -> int:
         action="store_true",
         help="Skip infrastructure preflight (dev/tests only)",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     abort_startup("subscriber", cli_skip=args.skip_preflight)
 
