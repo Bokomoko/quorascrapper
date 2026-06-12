@@ -450,11 +450,23 @@
     if (!session.resumePending && !session.collectingSince) {
       session.collectingSince = Date.now();
     }
+    if (msg.streamed) {
+      session.newCount = msg.published || 0;
+      renderDedupeLine();
+    }
     renderSession();
     if (session.resumePending) {
       setStatus("Fast-scrolling to last saved answer…");
     } else if (session.recovering) {
       setStatus("Pagination slow — nudging scroll…");
+    } else if (msg.streamed) {
+      setStatus(
+        "Collecting + publishing… " +
+          formatCount(msg.published || 0) +
+          " sent / " +
+          formatCount(msg.found || 0) +
+          " collected"
+      );
     } else {
       setStatus("Collecting new answers…");
     }
@@ -919,10 +931,19 @@
 
   async function initPanel() {
     resetSessionUI();
+    var version =
+      chrome.runtime && chrome.runtime.getManifest
+        ? chrome.runtime.getManifest().version
+        : null;
     var verEl = document.getElementById("ext-version");
-    if (verEl && chrome.runtime && chrome.runtime.getManifest) {
-      verEl.textContent = "v" + chrome.runtime.getManifest().version;
+    if (verEl && version) {
+      verEl.textContent = "v" + version;
       verEl.style.cssText = "font-weight:400;font-size:11px;color:#6b7280;";
+    }
+    // Always-visible version (the drag-handle is hidden in embedded panel mode).
+    var verFooter = document.getElementById("ext-version-footer");
+    if (verFooter && version) {
+      verFooter.textContent = "qsbk v" + version;
     }
     if (embedded && dragHandle) {
       dragHandle.classList.add("hidden");
@@ -972,6 +993,10 @@
 
       var method = methodEl && methodEl.value === "scroll" ? "scroll" : "graphql";
       var force = !!(forceEl && forceEl.checked);
+      // Stream publish: in API mode with Kafka output, the content script POSTs
+      // /upsert in batches as it collects, instead of buffering everything and
+      // publishing at the end. Survives interruptions and bounds memory.
+      var streamPublish = method === "graphql" && output === "kafka" && serveAvailable;
       var profileUrl = profileUrlFromAnswers(tab.url);
       var cursor = profileUrl ? await readProfileCursor(profileUrl) : null;
       var response = await chrome.tabs.sendMessage(tab.id, {
@@ -980,6 +1005,8 @@
         maxResults: maxResults,
         skipKnown: serveAvailable && !force,
         resumeAfterKey: force ? null : cursor && cursor.afterKey ? cursor.afterKey : null,
+        serveUpsertUrl: streamPublish ? SERVE_UPSERT : null,
+        force: force,
       });
 
       if (!response || !response.ok) {
@@ -989,6 +1016,34 @@
 
       var rows = response.rows || [];
       var meta = response.meta || {};
+
+      // Streamed publish: the content script already pushed everything to Kafka
+      // (rows comes back empty). Report the published totals and finish.
+      if (meta.streamed) {
+        session.found = meta.collected || 0;
+        session.newCount = meta.published || 0;
+        session.scrolled = meta.skipped_known || 0;
+        session.scrapeElapsedMs = sessionRateElapsedMs();
+        renderDedupeLine();
+        renderSession();
+        await refreshProfileSaved();
+        var errNote =
+          meta.publish_errors > 0 ? " (" + meta.publish_errors + " batch error(s))" : "";
+        setStatus(
+          "Session done — published " +
+            formatCount(meta.published || 0) +
+            " of " +
+            formatCount(meta.collected || 0) +
+            " collected to Kafka" +
+            (meta.skipped_known ? ", skipped " + formatCount(meta.skipped_known) + " known" : "") +
+            errNote +
+            sessionSummary() +
+            stopReasonHint(meta)
+        );
+        console.info("[qsbk] streamed session finished", meta);
+        return;
+      }
+
       session.found = rows.length;
       session.scrolled = meta.skipped_known || session.scrolled || 0;
       session.scrapeElapsedMs = sessionRateElapsedMs();

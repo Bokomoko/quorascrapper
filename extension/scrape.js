@@ -475,6 +475,9 @@
   var GQL_MAX_RETRIES = 4;
   var GQL_RETRY_BASE_MS = 1000;
   var GQL_PAGE_DELAY_MS = 150;
+  // When streaming to serve, publish in batches of this size as we collect, so
+  // large backfills don't buffer everything in memory and survive interruptions.
+  var GQL_PUBLISH_BATCH = 100;
 
   function gqlPageHtml() {
     return document.documentElement ? document.documentElement.innerHTML : "";
@@ -644,8 +647,18 @@
       };
     }
 
-    var records = {};
+    var serveUpsertUrl = options.serveUpsertUrl || null;
+    var streaming = !!serveUpsertUrl;
+    var force = !!options.force;
+
+    var seen = {};
+    var rowsOut = streaming ? null : [];
+    var publishBuffer = [];
     var seenSkippedKeys = {};
+    var collected = 0;
+    var published = 0;
+    var publishBatches = 0;
+    var publishErrors = 0;
     var skippedKnown = 0;
     var after = null;
     var pages = 0;
@@ -653,18 +666,49 @@
     var deepestUrl = null;
     var stopReason = "max_reached";
 
-    function sendProgress() {
-      var found = Object.keys(records).length;
+    console.info("[qsbk gql] streaming publish: " + (streaming ? "on" : "off") + " force=" + force);
+
+    async function publishOneBatch(batch) {
+      publishBatches += 1;
       try {
-        // Intentionally omit `rows` here: the API method is fast and can collect
-        // thousands of answers, so streaming the full growing set on every page
-        // would trigger a live-classify /check storm in the popup. Counts drive
-        // the progress UI; the final classify+publish uses the complete result.
+        var resp = await fetch(serveUpsertUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          cache: "no-store",
+          body: JSON.stringify({ answers: batch, force: force }),
+        });
+        if (resp.ok) {
+          var body = await resp.json();
+          published += (body && body.published) || 0;
+        } else {
+          publishErrors += 1;
+          console.warn("[qsbk gql] /upsert batch HTTP " + resp.status);
+        }
+      } catch (e) {
+        publishErrors += 1;
+        console.warn("[qsbk gql] /upsert batch failed:", (e && e.message) || e);
+      }
+    }
+
+    async function drainPublish(finalFlush) {
+      if (!streaming) return;
+      while (
+        publishBuffer.length >= GQL_PUBLISH_BATCH ||
+        (finalFlush && publishBuffer.length > 0)
+      ) {
+        await publishOneBatch(publishBuffer.splice(0, GQL_PUBLISH_BATCH));
+      }
+    }
+
+    function sendProgress() {
+      try {
         chrome.runtime.sendMessage({
           type: "progress",
-          found: found,
-          newFound: found,
+          found: collected,
+          newFound: collected,
           scrolled: skippedKnown,
+          published: published,
+          streamed: streaming,
           max: maxResults,
           stagnant: 0,
           recovering: false,
@@ -676,18 +720,17 @@
       }
     }
 
-    while (running && Object.keys(records).length < maxResults) {
+    while (running && collected < maxResults) {
       var resp;
       try {
         resp = await fetchAnswersPageRetry(ctx, after, pageSize, queryHash);
       } catch (e) {
-        // Exhausted retries (or non-retriable). Keep what we collected so far
-        // rather than discarding the whole run.
+        // Exhausted retries (or non-retriable). Keep/flush what we have rather
+        // than discarding the whole run.
         stopReason = "api_error:" + String((e && e.message) || e);
         console.error(
           "[qsbk gql] fetch failed at after=" + after +
-            " after retries — stopping with " + Object.keys(records).length +
-            " collected:",
+            " after retries — stopping with " + collected + " collected:",
           e
         );
         break;
@@ -706,11 +749,11 @@
       var edges = conn.edges || [];
       var addedThisPage = 0;
       for (var i = 0; i < edges.length; i++) {
-        if (Object.keys(records).length >= maxResults) break;
+        if (collected >= maxResults) break;
         var record = mapNodeToRecord(edges[i] && edges[i].node);
         if (!record) continue;
         deepestUrl = record.url;
-        if (records[record.url]) continue;
+        if (seen[record.url]) continue;
         if (skipKnown && gqlIsKnown(record.url, known)) {
           var skipKey = canonicalAnswerKey(record.url);
           if (skipKey && !seenSkippedKeys[skipKey]) {
@@ -719,8 +762,14 @@
           }
           continue;
         }
-        records[record.url] = record;
+        seen[record.url] = true;
+        collected += 1;
         addedThisPage += 1;
+        if (streaming) {
+          publishBuffer.push(record);
+        } else {
+          rowsOut.push(record);
+        }
       }
 
       pages += 1;
@@ -729,12 +778,14 @@
         "[qsbk gql] page " + pages +
           " — edges=" + edges.length +
           " new=" + addedThisPage +
-          " total=" + Object.keys(records).length +
+          " collected=" + collected +
+          " published=" + published +
           " skippedKnown=" + skippedKnown +
-          " after=" + after +
-          " endCursor=" + pageInfoLog.endCursor +
           " hasNext=" + pageInfoLog.hasNextPage
       );
+
+      // Stream out full batches as we go (bounds memory; survives interruption).
+      await drainPublish(false);
       if (typeof window.qsbkMarkCached === "function") window.qsbkMarkCached();
       sendProgress();
 
@@ -764,10 +815,16 @@
       if (GQL_PAGE_DELAY_MS > 0) await sleep(GQL_PAGE_DELAY_MS);
     }
 
-    var rows = recordsAsRows(records).slice(0, maxResults);
+    // Flush any remaining buffered answers.
+    await drainPublish(true);
+    sendProgress();
+
+    var rows = streaming ? [] : rowsOut.slice(0, maxResults);
     console.info(
       "[qsbk gql] done — stop_reason=" + stopReason +
-        " collected=" + rows.length +
+        " collected=" + collected +
+        " published=" + published +
+        " publishErrors=" + publishErrors +
         " skippedKnown=" + skippedKnown +
         " pages=" + pages
     );
@@ -779,11 +836,15 @@
       rows: rows,
       meta: {
         stop_reason: stopReason,
-        collected: rows.length,
+        collected: collected,
         requested: maxResults,
         skipped_known: skippedKnown,
         skip_known: skipKnown,
         mode: "graphql",
+        streamed: streaming,
+        published: published,
+        publish_batches: publishBatches,
+        publish_errors: publishErrors,
         pages: pages,
         deepest_url: deepestUrl,
         deepest_key: deepestUrl ? answerKeyFromUrl(deepestUrl) : null,
@@ -1018,6 +1079,8 @@
             skipKnown: skipKnown,
             queryHash: msg.queryHash || null,
             pageSize: msg.pageSize || null,
+            serveUpsertUrl: msg.serveUpsertUrl || null,
+            force: !!msg.force,
           });
         }
         return scrollAndCollect(maxResults, {

@@ -78,6 +78,8 @@ class ServeState:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings.from_env()
         self.sender: KafkaSender | None = None
+        self._mongo_client: Any | None = None
+        self._mongo_collection: Any | None = None
 
     def connect(self) -> None:
         errors = validate_serve_settings(self.settings)
@@ -85,14 +87,45 @@ class ServeState:
             raise ValueError("; ".join(errors))
         self.sender = KafkaSender(settings=self.settings)
         logger.info("qsbk serve connected to Kafka at %s", self.settings.kafka_bootstrap)
+        self._connect_mongo()
+
+    def _connect_mongo(self) -> None:
+        """Open one pooled MongoDB connection reused across all requests.
+
+        Opening a fresh ``MongoClient`` per ``/upsert`` batch costs seconds of
+        handshake/topology-discovery against Atlas and is the dominant cause of
+        progressive throughput decay during a bulk publish. A single pooled
+        client is thread-safe and shared across the ThreadingHTTPServer workers.
+        """
+        if not self.settings.mongodb_uri:
+            return
+        try:
+            from quorascrapper.subscriber.storage import connect_mongo
+
+            self._mongo_client, self._mongo_collection = connect_mongo(self.settings)
+            logger.info("qsbk serve reusing pooled MongoDB connection for lookups")
+        except Exception as exc:
+            logger.warning(
+                "qsbk serve could not open pooled MongoDB connection; "
+                "idempotency lookups will reconnect per batch: %s",
+                exc,
+            )
+            self._mongo_client = None
+            self._mongo_collection = None
 
     def close(self) -> None:
         if self.sender is not None:
             self.sender.close()
             self.sender = None
+        if self._mongo_client is not None:
+            try:
+                self._mongo_client.close()
+            finally:
+                self._mongo_client = None
+                self._mongo_collection = None
 
     def known_snapshot(self) -> dict[str, Any]:
-        return known_payload(settings=self.settings)
+        return known_payload(settings=self.settings, collection=self._mongo_collection)
 
     def classify_answers(
         self,
@@ -108,7 +141,9 @@ class ServeState:
         if not rows:
             return ClassifyReport(0, 0, 0, [], [])
 
-        plan = plan_idempotent_ingest(rows, self.settings, force=force)
+        plan = plan_idempotent_ingest(
+            rows, self.settings, force=force, collection=self._mongo_collection
+        )
         publish_hashes = {row["hash"] for row in plan.to_publish}
         new_rows = [row for row in rows if row["hash"] in publish_hashes]
         skipped_urls = [row["url"] for row in rows if row["hash"] not in publish_hashes]

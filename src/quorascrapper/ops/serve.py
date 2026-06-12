@@ -34,6 +34,9 @@ class QsbkHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # Cache the preflight so streamed batch POSTs don't re-OPTIONS each time.
+        # Chrome caps this at 7200s; that's plenty for a long backfill run.
+        self.send_header("Access-Control-Max-Age", "7200")
 
     def do_OPTIONS(self) -> None:
         self.send_response(204)

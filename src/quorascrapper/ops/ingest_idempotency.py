@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from quorascrapper.config import Settings
 from quorascrapper.ops.known_urls import mongo_known_hashes
@@ -20,12 +21,13 @@ def plan_idempotent_ingest(
     settings: Settings,
     *,
     force: bool = False,
+    collection: Any | None = None,
 ) -> IngestPlan:
     if force or not rows:
         return IngestPlan(rows, 0, 0)
 
     candidate = {row["hash"] for row in rows}
-    in_mongo = mongo_known_hashes(settings, candidate)
+    in_mongo = mongo_known_hashes(settings, candidate, collection=collection)
 
     to_publish: list[dict[str, str]] = []
     skipped_mongo = 0
