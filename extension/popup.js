@@ -688,10 +688,14 @@
     return null;
   }
 
-  // Auto-fill the Max input with the profile's total once it resolves. One-shot
-  // per profile so a later stats repaint never clobbers a value the user typed,
-  // and never fights an in-progress session. Falls back to the HTML default
-  // (100) until the total is known.
+  // Auto-fill the Max input with the owner's total once it resolves. The total
+  // is now the GraphQL/relay-derived owner answer_count (profileState.total),
+  // so Max prefills with the SAME corrected number shown in the TOTAL stat.
+  // One-shot per profile (the maxAutoFilled guard is reset on profile change in
+  // fetchProfileTotal, so switching profiles re-prefills with the new owner's
+  // total) so a later stats repaint never clobbers a value the user typed, and
+  // never fights an in-progress session. Falls back to the HTML default (100)
+  // until the total is known.
   function prefillMaxFromTotal() {
     if (maxAutoFilled || session.active) return;
     if (profileState.total == null || isNaN(profileState.total)) return;
@@ -740,13 +744,15 @@
     });
   }
 
-  async function readStatsFromTab(tabId) {
+  // Ask the content script for the OWNER's identity + total, derived from the
+  // page's GraphQL/relay data (DOM fallback inside the content script). Returns
+  // the full info object so the popup can both scope SAVED to the owner's
+  // canonical profile_url and set TOTAL from the GraphQL answer_count.
+  async function readOwnerInfoFromTab(tabId) {
     try {
       await ensureScraper(tabId);
-      var response = await chrome.tabs.sendMessage(tabId, { type: "getProfileStats" });
-      if (response && response.ok && response.stats && response.stats.answers != null) {
-        return response.stats.answers;
-      }
+      var response = await chrome.tabs.sendMessage(tabId, { type: "getProfileInfo" });
+      if (response && response.ok && response.info) return response.info;
     } catch (e) {
       /* ignore */
     }
@@ -755,36 +761,52 @@
 
   async function fetchProfileTotal(tab) {
     if (!tab || !tab.url) return null;
-    var profileUrl = profileUrlFromAnswers(tab.url);
-    if (!profileUrl) return null;
+    // Canonical owner URL from the /answers tab. Used to scope SAVED until the
+    // content script confirms the owner (the two derive identically).
+    var ownerUrl = profileUrlFromAnswers(tab.url);
+    if (!ownerUrl) return null;
     // On a profile change, drop the previous profile's numbers and the
     // one-shot prefill guard so we never SHOW or auto-fill another profile's
     // total while the new one is still loading. (profileState is module-level
     // and the embedded panel survives tab navigation, so it would otherwise
     // keep displaying a stale total.)
-    if (profileUrl !== activeProfileUrl) {
+    if (ownerUrl !== activeProfileUrl) {
       profileState.total = null;
       profileState.saved = null;
       maxAutoFilled = false;
     }
-    activeProfileUrl = profileUrl;
+    // Scope SAVED to THIS owner right away so the periodic saved poll never
+    // reads the global ("answers") collection while we resolve the owner.
+    activeProfileUrl = ownerUrl;
 
-    // Prefer FRESHNESS on open: read the CURRENT active tab's DOM first so a
-    // stale per-profile cache entry (or a TTL-window count from before a new
-    // ingest) never wins over what the live page reports.
+    // Prefer FRESHNESS on open: read the CURRENT active tab's GraphQL/relay
+    // owner info first so a stale per-profile cache entry (or a TTL-window
+    // count from before a new ingest) never wins over the live page.
     renderProfilePanel(true);
-    var fromActive = await readStatsFromTab(tab.id);
-    if (fromActive != null) {
-      profileState.total = fromActive;
-      writeProfileCache(profileUrl, fromActive);
-      renderProfilePanel(false);
-      return fromActive;
+    var info = await readOwnerInfoFromTab(tab.id);
+    if (info) {
+      // Pin SAVED scoping to the owner the content script actually resolved.
+      if (info.profile_url) {
+        ownerUrl = info.profile_url;
+        activeProfileUrl = info.profile_url;
+      }
+      if (info.answer_count != null) {
+        profileState.total = info.answer_count;
+        writeProfileCache(ownerUrl, info.answer_count);
+        // Prefill Max with this GraphQL-derived owner total (one-shot per
+        // profile; renderProfilePanel→renderStats also calls it).
+        prefillMaxFromTotal();
+        renderProfilePanel(false);
+        // Re-fetch SAVED now that the owner is scoped (0 for a fresh profile).
+        refreshProfileSaved();
+        return info.answer_count;
+      }
     }
 
-    // Active tab couldn't yield a number (not loaded / DOM changed) — fall back
-    // to THIS profile's own cached value (scoped per profile URL) before the
-    // expensive background-tab fetch.
-    var cached = await readProfileCache(profileUrl);
+    // Active tab couldn't yield a number (not loaded / relay+DOM both empty) —
+    // fall back to THIS owner's own cached value (scoped per profile URL)
+    // before the expensive background-tab fetch.
+    var cached = await readProfileCache(ownerUrl);
     if (cached != null) {
       profileState.total = cached;
       renderProfilePanel(false);
@@ -793,15 +815,21 @@
 
     var bgTab = null;
     try {
-      bgTab = await chrome.tabs.create({ url: profileUrl, active: false });
+      bgTab = await chrome.tabs.create({ url: ownerUrl, active: false });
       await waitForTabLoad(bgTab.id);
       await sleep(1500);
-      var total = await readStatsFromTab(bgTab.id);
-      if (total != null) {
-        profileState.total = total;
-        writeProfileCache(profileUrl, total);
+      var bgInfo = await readOwnerInfoFromTab(bgTab.id);
+      if (bgInfo && bgInfo.answer_count != null) {
+        if (bgInfo.profile_url) {
+          ownerUrl = bgInfo.profile_url;
+          activeProfileUrl = bgInfo.profile_url;
+        }
+        profileState.total = bgInfo.answer_count;
+        writeProfileCache(ownerUrl, bgInfo.answer_count);
+        prefillMaxFromTotal();
         renderProfilePanel(false);
-        return total;
+        refreshProfileSaved();
+        return bgInfo.answer_count;
       }
     } catch (e) {
       /* ignore */
@@ -914,6 +942,13 @@
 
   async function fetchKnownCount() {
     if (!SERVE_KNOWN) return null;
+    // SAVED must ALWAYS be the current owner's own persisted count. Until the
+    // owner's canonical profile_url is resolved, send NO request — querying
+    // /known without a profile_url makes serve fall back to the global
+    // ("answers") collection (~16k from the initial backfill), which would
+    // wrongly show as this profile's "saved". A never-ingested profile then
+    // correctly reads 0 (its own empty collection), not the global count.
+    if (!activeProfileUrl) return null;
     try {
       // Scope the "saved" count to the active profile's own collection, and ask
       // for the cheap count-only response so we never download the full

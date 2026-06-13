@@ -550,6 +550,109 @@
     };
   }
 
+  /* ---------------------------------------------------------------------------
+   * Owner identity + total answer count, derived from the GraphQL/relay data
+   * Quora embeds in the page (NOT DOM scraping).
+   *
+   * The profile page's relay store carries the OWNER's User record, whose
+   * `numPublicAnswers` is the canonical total answer count shown on the Answers
+   * tab. It sits immediately before the answers-tab connection
+   * (`recentPublicAndPinnedAnswersConnection`) in the embedded JSON, so we read
+   * the `numPublicAnswers` closest before that connection — that record is the
+   * page owner's (other users' records, e.g. suggested profiles, are followed
+   * by `network`/`postsCount`, not the answers connection).
+   * ------------------------------------------------------------------------ */
+
+  // Canonical owner profile URL for the page in view. On a
+  // /profile/<slug>/answers page the owner is <slug>; strip the /answers tab
+  // (and any query/hash) to get https://<host>/profile/<slug>. This matches the
+  // popup's profileUrlFromAnswers() and the URL used at ingest time, so the
+  // serve-side per-profile collection (and its "saved" count) line up exactly.
+  function ownerProfileUrlFromLocation() {
+    try {
+      var u = new URL(location.href);
+      u.pathname = u.pathname.replace(/\/answers\/?.*$/, "");
+      u.search = "";
+      u.hash = "";
+      return u.href;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function ownerSlugFromUrl(url) {
+    try {
+      var u = new URL(url);
+      var m = u.pathname.match(/\/profile\/([^/]+)/);
+      return m ? m[1] : "";
+    } catch (e) {
+      return "";
+    }
+  }
+
+  // Owner's total answers from the embedded relay JSON. The page text may carry
+  // either single- (\") or unescaped (") relay payloads depending on how Quora
+  // serializes it, so the regex tolerates an optional backslash before quotes.
+  function extractOwnerAnswerCountFromGraphql() {
+    var html = gqlPageHtml();
+    if (!html) return null;
+
+    // Primary: the numPublicAnswers closest BEFORE the answers-tab connection
+    // belongs to the page owner.
+    var connIdx = html.indexOf("recentPublicAndPinnedAnswersConnection");
+    if (connIdx !== -1) {
+      var before = html.slice(Math.max(0, connIdx - 800), connIdx);
+      var all = before.match(/numPublicAnswers\\?"?\s*:\s*(\d+)/g);
+      if (all && all.length) {
+        var last = all[all.length - 1].match(/(\d+)/);
+        if (last) return parseInt(last[1], 10);
+      }
+    }
+
+    // Fallback: a numPublicAnswers record immediately followed by the owner's
+    // numProfileQuestions/numQuestions field (the owner User shape).
+    var m = html.match(
+      /numPublicAnswers\\?"?\s*:\s*(\d+)\s*,\s*\\?"?num(?:Profile)?Questions/
+    );
+    if (m) return parseInt(m[1], 10);
+
+    return null;
+  }
+
+  // Owner identity + total for the popup. GraphQL/relay first; DOM
+  // (extractProfileStats) only as a last resort so a profile whose page markup
+  // changed still reports a number when the relay data is present.
+  function extractOwnerInfo() {
+    var profileUrl = ownerProfileUrlFromLocation();
+    var count = extractOwnerAnswerCountFromGraphql();
+    var source = count != null ? "graphql" : null;
+    if (count == null) {
+      var stats = extractProfileStats();
+      if (stats && stats.answers != null && !isNaN(stats.answers)) {
+        count = stats.answers;
+        source = "dom";
+      }
+    }
+    var slug = ownerSlugFromUrl(profileUrl || location.href);
+    var name = slug;
+    try {
+      name = decodeURIComponent(slug);
+    } catch (e) {
+      /* keep raw slug */
+    }
+    var ctx = extractPageContext();
+    return {
+      profile_url: profileUrl,
+      profile_name: name || null,
+      profile_display_name: extractProfileDisplayName() || null,
+      answer_count: count != null && !isNaN(count) ? Math.floor(count) : null,
+      uid: ctx.uid || null,
+      source: source,
+    };
+  }
+
+  window.qsbkExtractOwnerInfo = extractOwnerInfo;
+
   function qtextToPlain(qtext) {
     if (!qtext) return "";
     var doc = qtext;
@@ -1129,6 +1232,14 @@
 
     if (msg.type === "getProfileStats") {
       sendResponse({ ok: true, stats: extractProfileStats() });
+      return false;
+    }
+
+    // Owner identity + total answer count from GraphQL/relay data (DOM
+    // fallback). The popup uses this to scope SAVED to the current owner and
+    // populate TOTAL without DOM scraping.
+    if (msg.type === "getProfileInfo") {
+      sendResponse({ ok: true, info: extractOwnerInfo() });
       return false;
     }
 
