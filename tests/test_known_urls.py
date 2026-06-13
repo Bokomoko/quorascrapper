@@ -62,3 +62,23 @@ def test_mongo_known_hashes(tmp_path):
         found = mongo_known_hashes(settings, {h})
     assert found == {h}
     client.close.assert_called_once()
+
+
+def test_mongo_known_hashes_reconnect_scopes_to_collection_name():
+    """A reconnect (no pooled collection) reads from the per-profile collection."""
+    import mongomock
+
+    from quorascrapper.ops.known_urls import mongo_known_hashes
+
+    settings = MagicMock(mongodb_uri="mongodb://localhost", mongodb_database="quora_data")
+    h = url_hash("https://pt.quora.com/profile/x/answer/scoped")
+    client = mongomock.MongoClient()
+    # The hash exists ONLY in the per-profile collection, not the default one.
+    client["quora_data"]["profile_uid"].insert_one({"hash": h})
+    with patch("quorascrapper.subscriber.storage.connect_mongo") as connect:
+        connect.return_value = (client, client["quora_data"]["answers"])
+        found = mongo_known_hashes(settings, {h}, collection_name="profile_uid")
+        # Without scoping it would read the (empty) default collection.
+        unscoped = mongo_known_hashes(settings, {h})
+    assert found == {h}
+    assert unscoped == set()

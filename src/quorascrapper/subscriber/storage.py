@@ -19,7 +19,7 @@ from pymongo import ASCENDING, MongoClient  # type: ignore
 from pymongo.collection import Collection  # type: ignore
 
 from quorascrapper.config import Settings
-from quorascrapper.filter.core import answer_url_kind
+from quorascrapper.filter.core import answer_url_kind, profile_collection_name
 from quorascrapper.logging_setup import init_logging
 
 logger = init_logging("subscriber")
@@ -27,21 +27,17 @@ logger = init_logging("subscriber")
 # Registry collection name (fixed; not derived from a profile).
 PROFILES_COLLECTION = "profiles"
 
-# Per-profile collections are named "<prefix><userid>". The userid is a 32-char
-# blake2s hex digest, so "profile_<userid>" is ~40 chars: always Mongo-safe
-# (no "$", non-empty, not "system."-prefixed) and well under the length limit.
-COLLECTION_PREFIX = "profile_"
-
 
 def collection_name_for_doc(data: dict[str, Any], default: str) -> str:
     """Pick the target collection for a doc.
 
-    Routes by the server-derived ``userid`` (``profile_<userid>``); falls back
-    to ``default`` ("answers") when no profile identity is present.
+    Routes by the server-derived ``userid`` (``profile_<userid>`` via the shared
+    :func:`profile_collection_name` helper); falls back to ``default``
+    ("answers") when no profile identity is present.
     """
     userid = data.get("userid")
     if userid:
-        return f"{COLLECTION_PREFIX}{userid}"
+        return profile_collection_name(str(userid))
     return default
 
 

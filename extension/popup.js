@@ -205,6 +205,11 @@
     fetchPromise: null,
   };
 
+  // Canonical-ish profile URL for the tab currently in view. Used to scope
+  // known/check/saved lookups to this profile's own collection so dedup never
+  // reads the global legacy "answers" collection. serve canonicalizes it.
+  var activeProfileUrl = null;
+
   var session = {
     active: false,
     startedAt: null,
@@ -676,6 +681,7 @@
     profilePanel.classList.remove("visible");
     profileState.total = null;
     profileState.saved = null;
+    activeProfileUrl = null;
   }
 
   function readProfileCache(profileUrl) {
@@ -715,6 +721,7 @@
     if (!tab || !tab.url) return null;
     var profileUrl = profileUrlFromAnswers(tab.url);
     if (!profileUrl) return null;
+    activeProfileUrl = profileUrl;
 
     var cached = await readProfileCache(profileUrl);
     if (cached != null) {
@@ -783,7 +790,9 @@
   async function fetchKnownCount() {
     if (!SERVE_KNOWN) return null;
     try {
-      var response = await fetch(SERVE_KNOWN, { cache: "no-store" });
+      // Scope the "saved" count to the active profile's own collection.
+      var knownUrl = window.qsbkServeConfig.knownUrl(SERVE_BASE, activeProfileUrl);
+      var response = await fetch(knownUrl, { cache: "no-store" });
       if (!response.ok) return null;
       var data = await response.json();
       return data && typeof data.count === "number" ? data.count : null;
@@ -851,7 +860,8 @@
     }
   }
 
-  async function checkAnswersWithServe(rows, force) {
+  async function checkAnswersWithServe(rows, force, profileUrl) {
+    var pu = profileUrl || activeProfileUrl;
     var batches = chunk(rowsForCheck(rows), SERVE_BATCH);
     var merged = {
       new_count: 0,
@@ -861,11 +871,14 @@
       skipped_urls: [],
     };
     for (var i = 0; i < batches.length; i++) {
+      var body = { answers: batches[i], force: !!force };
+      // Scope dedup to this profile's own collection (serve canonicalizes).
+      if (pu) body.profile_url = pu;
       var response = await fetch(SERVE_CHECK, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         cache: "no-store",
-        body: JSON.stringify({ answers: batches[i], force: !!force }),
+        body: JSON.stringify(body),
       });
       var body = {};
       try {
@@ -934,6 +947,7 @@
   async function sendToKafka(rows, force, identity) {
     var batches = chunk(rowsForServe(rows, identity), SERVE_BATCH);
     var totals = { published: 0, skipped: 0, skipped_mongo: 0, urls: [] };
+    var profileUrl = (identity && identity.profile_url) || activeProfileUrl;
     console.info(
       "[qsbk] POST /upsert",
       rows.length,
@@ -943,11 +957,14 @@
       force ? "(force)" : ""
     );
     for (var i = 0; i < batches.length; i++) {
+      var body = { answers: batches[i], force: !!force };
+      // Scope publish-side dedup to this profile's own collection.
+      if (profileUrl) body.profile_url = profileUrl;
       var response = await fetch(SERVE_UPSERT, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         cache: "no-store",
-        body: JSON.stringify({ answers: batches[i], force: !!force }),
+        body: JSON.stringify(body),
       });
       var body = {};
       try {
@@ -1047,6 +1064,7 @@
       // publishing at the end. Survives interruptions and bounds memory.
       var streamPublish = method === "graphql" && output === "kafka" && serveAvailable;
       var profileUrl = profileUrlFromAnswers(tab.url);
+      if (profileUrl) activeProfileUrl = profileUrl;
       var profileIdentity = buildProfileIdentity(tab.url, profileState.total);
       var cursor = profileUrl ? await readProfileCursor(profileUrl) : null;
       var response = await chrome.tabs.sendMessage(tab.id, {
@@ -1149,7 +1167,7 @@
 
       if (serveAvailable || output === "kafka") {
         setStatus("Checking answers with qsbk serve…");
-        classify = await checkAnswersWithServe(rows, force);
+        classify = await checkAnswersWithServe(rows, force, profileUrl);
         applyClassifyReport(classify);
         exportRows = rowsMatchingNew(rows, classify.new || []);
         meta.session_new_count = classify.new_count;

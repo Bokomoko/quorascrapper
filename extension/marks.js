@@ -235,7 +235,9 @@
 
   if (location.href.indexOf("/answers") !== -1) {
     window.qsbkServeConfig.getServeBase(function (base) {
-      SERVE_URL = window.qsbkServeConfig.serveUrls(base).known;
+      // Scope checkmarks to THIS profile's own collection (serve canonicalizes
+      // location.href) so badges reflect what's saved for this profile only.
+      SERVE_URL = window.qsbkServeConfig.knownUrl(base, location.href);
       refreshMarks().then(function (result) {
         if (!result.ok) refreshFromCache();
         startPolling();

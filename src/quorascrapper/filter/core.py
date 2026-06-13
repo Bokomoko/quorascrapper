@@ -9,7 +9,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 _PROFILE_ANSWER_RE = re.compile(r"/profile/[^/]+/answer/\d+", re.IGNORECASE)
 
@@ -29,10 +29,17 @@ def url_hash(url: str) -> str:
 def canonical_profile_url(url: str) -> str:
     """Canonicalize a Quora profile URL so a profile maps to one stable userid.
 
-    Forces ``https``, lowercases the host, drops query/fragment, strips a
+    Forces ``https``, lowercases the host, drops query/fragment, percent-decodes
+    the path (so ``Jo%C3%A3o`` and ``João`` collapse to one identity), strips a
     trailing profile tab suffix (``/answers``, ``/questions``, ...) and any
     trailing slash. The path case is preserved (Quora slugs are case-sensitive).
     Returns ``""`` for empty input and best-effort cleans scheme-less input.
+
+    Percent-decoding is REQUIRED for correct dedup scoping: the extension may
+    send either the encoded (``%C3%A3``) or decoded (``ã``) form, and serve must
+    derive the SAME ``userid`` (and therefore the same ``profile_<userid>``
+    collection) for both, so a scoped ``/known`` read and the subscriber write
+    never diverge.
     """
     raw = (url or "").strip()
     if not raw:
@@ -41,7 +48,8 @@ def canonical_profile_url(url: str) -> str:
         raw = "https://" + raw
     parts = urlsplit(raw)
     netloc = (parts.netloc or "").lower()
-    path = _PROFILE_TAB_SUFFIX_RE.sub("", parts.path or "")
+    path = unquote(parts.path or "")
+    path = _PROFILE_TAB_SUFFIX_RE.sub("", path)
     path = path.rstrip("/")
     return urlunsplit(("https", netloc, path, "", ""))
 
@@ -49,6 +57,20 @@ def canonical_profile_url(url: str) -> str:
 def profile_userid(profile_url: str) -> str:
     """Stable per-profile id: blake2s hash of the canonical profile URL."""
     return url_hash(canonical_profile_url(profile_url))
+
+
+# Per-profile MongoDB collection naming. SINGLE SOURCE OF TRUTH: the subscriber
+# WRITES answers into ``profile_<userid>`` and ``qsbk serve`` READS dedup/known
+# from the same name. Both paths must call this helper so the names can never
+# drift. The userid is a 32-char blake2s hex digest, so the result is ~40 chars:
+# always Mongo-safe (no "$", non-empty, not "system."-prefixed, under the length
+# limit).
+PROFILE_COLLECTION_PREFIX = "profile_"
+
+
+def profile_collection_name(userid: str) -> str:
+    """Collection name for a profile's answers: ``profile_<userid>``."""
+    return f"{PROFILE_COLLECTION_PREFIX}{userid}"
 
 
 def answer_url_kind(url: str) -> str:

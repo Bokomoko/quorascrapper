@@ -22,12 +22,15 @@ def plan_idempotent_ingest(
     *,
     force: bool = False,
     collection: Any | None = None,
+    collection_name: str | None = None,
 ) -> IngestPlan:
     if force or not rows:
         return IngestPlan(rows, 0, 0)
 
     candidate = {row["hash"] for row in rows}
-    in_mongo = mongo_known_hashes(settings, candidate, collection=collection)
+    in_mongo = mongo_known_hashes(
+        settings, candidate, collection=collection, collection_name=collection_name
+    )
 
     to_publish: list[dict[str, str]] = []
     skipped_mongo = 0

@@ -3,9 +3,30 @@ import threading
 from http.client import HTTPConnection
 from unittest.mock import MagicMock, patch
 
-from quorascrapper.filter.core import profile_userid, url_hash
+import mongomock
+
+from quorascrapper.filter.core import (
+    profile_collection_name,
+    profile_userid,
+    url_hash,
+)
 from quorascrapper.ops.serve import QsbkHandler, QsbkHTTPServer
 from quorascrapper.ops.serve_store import ServeState
+
+
+def _mongomock_state():
+    """ServeState wired to an in-memory Mongo with a default + per-profile setup."""
+    client = mongomock.MongoClient()
+    settings = MagicMock(
+        mongodb_uri="mongodb://localhost",
+        mongodb_database="quora_data",
+        mongodb_collection="answers",
+        kafka_bootstrap="host:9092",
+    )
+    state = ServeState(settings=settings)
+    state._mongo_client = client
+    state._mongo_collection = client["quora_data"]["answers"]
+    return state, client["quora_data"]
 
 
 def _start_server(state: ServeState):
@@ -190,6 +211,133 @@ def test_upsert_derives_userid_and_publishes_profile_fields():
         assert sent["userid"] == profile_userid(profile_url)
         assert sent["userid"] == profile_userid("https://pt.quora.com/profile/alice")
         assert "profile_collection" not in sent
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_known_snapshot_scopes_to_profile_collection():
+    """GET /known scoping: a profile_url reads from its own collection only."""
+    state, db = _mongomock_state()
+
+    profile_a = "https://pt.quora.com/profile/_qsbk_scopetest_A/answers"
+    name_a = profile_collection_name(profile_userid(profile_a))
+    url_a = "https://pt.quora.com/profile/_qsbk_scopetest_A/answer/aaa"
+    db[name_a].insert_one({"url": url_a, "hash": url_hash(url_a)})
+
+    # Global "answers" holds an unrelated legacy doc (e.g. João Eurico's data).
+    url_legacy = "https://pt.quora.com/profile/legacy/answer/zzz"
+    db["answers"].insert_one({"url": url_legacy, "hash": url_hash(url_legacy)})
+
+    # (a) Profile A → only its own answer, not the legacy one.
+    snap_a = state.known_snapshot(profile_url=profile_a)
+    assert snap_a["count"] == 1
+    assert url_a in snap_a["urls"]
+    assert url_legacy not in snap_a["urls"]
+
+    # (b) Profile B (never published) → EMPTY (isolation; not contaminated).
+    snap_b = state.known_snapshot(
+        profile_url="https://pt.quora.com/profile/_qsbk_scopetest_B"
+    )
+    assert snap_b["count"] == 0
+    assert snap_b["urls"] == []
+
+    # (c) No profile_url → global default ("answers") behavior preserved.
+    snap_default = state.known_snapshot()
+    assert snap_default["count"] == 1
+    assert url_legacy in snap_default["urls"]
+
+
+def test_classify_dedup_scoped_per_profile():
+    """The dedup bug fix: a hash present only in the global "answers" collection
+    must NOT mark a profile's re-scrape as a known duplicate."""
+    state, db = _mongomock_state()
+
+    url = "https://pt.quora.com/profile/_qsbk_scopetest_A/answer/dup"
+    h = url_hash(url)
+    profile_a = "https://pt.quora.com/profile/_qsbk_scopetest_A"
+
+    # The hash exists ONLY in the legacy global "answers" collection.
+    db["answers"].insert_one({"url": url, "hash": h})
+
+    # Scoped to profile A (its own collection is empty) → counts as NEW.
+    report_a = state.classify_answers([{"url": url, "hash": h}], profile_url=profile_a)
+    assert report_a.new_count == 1
+    assert report_a.skipped_mongo == 0
+
+    # No profile (global) → the legacy duplicate is found and skipped.
+    report_default = state.classify_answers([{"url": url, "hash": h}])
+    assert report_default.new_count == 0
+    assert report_default.skipped_mongo == 1
+
+
+def test_known_endpoint_passes_profile_url_query_to_state():
+    """do_GET parses ?profile_url= and forwards it to known_snapshot."""
+    state = ServeState(settings=MagicMock(mongodb_uri="mongodb://localhost"))
+    captured = {}
+
+    def fake_snapshot(*, profile_url=None):
+        captured["profile_url"] = profile_url
+        return {"urls": [], "keys": [], "count": 0, "last_ingested": None}
+
+    state.known_snapshot = fake_snapshot  # type: ignore[method-assign]
+    server, port, thread = _start_server(state)
+    try:
+        conn = HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request(
+            "GET",
+            "/known?profile_url=https%3A%2F%2Fpt.quora.com%2Fprofile%2Falice",
+        )
+        response = conn.getresponse()
+        response.read()
+        conn.close()
+        assert response.status == 200
+        assert captured["profile_url"] == "https://pt.quora.com/profile/alice"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_check_endpoint_forwards_profile_url_to_classify():
+    """POST /check forwards a body-level profile_url into classify_answers."""
+    state = ServeState(settings=MagicMock(mongodb_uri="mongodb://localhost"))
+    captured = {}
+    real_classify = state.classify_answers
+
+    def wrapper(raw_rows, *, force=False, profile_url=None, userid=None):
+        captured["profile_url"] = profile_url
+        return real_classify(
+            raw_rows, force=force, profile_url=profile_url, userid=userid
+        )
+
+    state.classify_answers = wrapper  # type: ignore[method-assign]
+    url = "https://pt.quora.com/profile/alice/answer/x"
+    server, port, thread = _start_server(state)
+    try:
+        payload = json.dumps(
+            {
+                "answers": [{"url": url, "hash": url_hash(url)}],
+                "profile_url": "https://pt.quora.com/profile/alice",
+            }
+        )
+        conn = HTTPConnection("127.0.0.1", port, timeout=5)
+        with patch(
+            "quorascrapper.ops.ingest_idempotency.mongo_known_hashes",
+            return_value=set(),
+        ):
+            conn.request(
+                "POST",
+                "/check",
+                body=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            response = conn.getresponse()
+            response.read()
+        conn.close()
+        assert response.status == 200
+        assert captured["profile_url"] == "https://pt.quora.com/profile/alice"
     finally:
         server.shutdown()
         server.server_close()

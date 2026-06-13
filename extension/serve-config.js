@@ -38,6 +38,18 @@
     loadDefaultBase(cb);
   }
 
+  // Build the GET /known URL, optionally scoped to a profile. serve resolves
+  // the profile to its own collection (profile_<userid>) and reads known/dedup
+  // from there; with no profile_url it keeps the global ("answers") behavior.
+  // The raw profile URL is fine — serve canonicalizes before hashing.
+  function knownUrl(base, profileUrl) {
+    var url = normalizeBase(base) + "/known";
+    if (profileUrl) {
+      url += "?profile_url=" + encodeURIComponent(profileUrl);
+    }
+    return url;
+  }
+
   function serveUrls(base) {
     base = normalizeBase(base);
     return {
@@ -54,5 +66,6 @@
     normalizeBase: normalizeBase,
     getServeBase: getServeBase,
     serveUrls: serveUrls,
+    knownUrl: knownUrl,
   };
 })(typeof window !== "undefined" ? window : self);

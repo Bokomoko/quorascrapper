@@ -7,10 +7,22 @@ from quorascrapper.filter.core import (
     normalize_row,
     parse_csv,
     parse_jsonl,
+    profile_collection_name,
     profile_userid,
     to_csv,
     url_hash,
 )
+
+
+def test_profile_collection_name_is_single_source_of_truth():
+    # Plain prefix + userid, byte-for-byte what the subscriber writes to.
+    assert profile_collection_name("abc123") == "profile_abc123"
+    uid = profile_userid("https://pt.quora.com/profile/alice/answers")
+    assert profile_collection_name(uid) == "profile_" + uid
+    # The subscriber's routing helper must agree with this name.
+    from quorascrapper.subscriber.storage import collection_name_for_doc
+
+    assert collection_name_for_doc({"userid": uid}, "answers") == profile_collection_name(uid)
 
 
 def test_answer_url_kind():
@@ -122,6 +134,25 @@ def test_canonical_profile_url_normalizes_variants():
     # scheme-less input is handled best-effort
     assert canonical_profile_url("pt.quora.com/profile/Alice-Silva/answers") == base
     assert canonical_profile_url("") == ""
+
+
+def test_canonical_profile_url_normalizes_percent_encoding():
+    """Encoded and decoded forms of the same non-ASCII slug must collapse to ONE
+    canonical URL and ONE userid, else scoped /known and the subscriber write
+    resolve to different profile_<userid> collections and dedup breaks."""
+    encoded = "https://pt.quora.com/profile/Jo%C3%A3o-Eurico-de-Aguiar-Lima"
+    decoded = "https://pt.quora.com/profile/João-Eurico-de-Aguiar-Lima"
+    encoded_tab = encoded + "/answers"
+
+    canon = canonical_profile_url(decoded)
+    assert canonical_profile_url(encoded) == canon
+    assert canonical_profile_url(encoded_tab) == canon
+    # All three must hash to the SAME userid.
+    uid = profile_userid(decoded)
+    assert profile_userid(encoded) == uid
+    assert profile_userid(encoded_tab) == uid
+    # The shared collection name is therefore identical for every form.
+    assert profile_collection_name(profile_userid(encoded)) == profile_collection_name(uid)
 
 
 def test_profile_userid_is_stable_across_variants():

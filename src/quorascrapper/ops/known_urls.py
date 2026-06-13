@@ -25,6 +25,22 @@ def canonical_answer_url(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc.lower()}{path}"
 
 
+def _connect(settings: Settings, collection_name: str | None) -> tuple[Any, Any]:
+    """Open a Mongo connection and return ``(client, collection)``.
+
+    When ``collection_name`` is given, the returned collection is that
+    per-profile collection (``profile_<userid>``) instead of the default
+    ("answers") one, so callers that reconnect per request still read/dedup
+    against the right collection.
+    """
+    from quorascrapper.subscriber.storage import connect_mongo
+
+    client, coll = connect_mongo(settings)
+    if collection_name:
+        coll = client[settings.mongodb_database][collection_name]
+    return client, coll
+
+
 def _query_known_hashes(collection: Any, hashes: set[str]) -> set[str]:
     cursor = collection.find(
         {"hash": {"$in": list(hashes)}},
@@ -38,6 +54,7 @@ def mongo_known_hashes(
     hashes: set[str],
     *,
     collection: Any | None = None,
+    collection_name: str | None = None,
 ) -> set[str]:
     if not hashes:
         return set()
@@ -50,9 +67,7 @@ def mongo_known_hashes(
     if not settings.mongodb_uri:
         return set()
     try:
-        from quorascrapper.subscriber.storage import connect_mongo
-
-        client, coll = connect_mongo(settings)
+        client, coll = _connect(settings, collection_name)
         try:
             return _query_known_hashes(coll, hashes)
         finally:
@@ -71,6 +86,7 @@ def mongo_known_urls(
     settings: Settings,
     *,
     collection: Any | None = None,
+    collection_name: str | None = None,
 ) -> set[str]:
     if collection is not None:
         try:
@@ -81,9 +97,7 @@ def mongo_known_urls(
     if not settings.mongodb_uri:
         return set()
     try:
-        from quorascrapper.subscriber.storage import connect_mongo
-
-        client, coll = connect_mongo(settings)
+        client, coll = _connect(settings, collection_name)
         try:
             return _query_known_urls(coll)
         finally:
@@ -120,6 +134,7 @@ def mongo_last_ingested(
     settings: Settings,
     *,
     collection: Any | None = None,
+    collection_name: str | None = None,
 ) -> dict[str, Any] | None:
     if collection is not None:
         try:
@@ -130,9 +145,7 @@ def mongo_last_ingested(
     if not settings.mongodb_uri:
         return None
     try:
-        from quorascrapper.subscriber.storage import connect_mongo
-
-        client, coll = connect_mongo(settings)
+        client, coll = _connect(settings, collection_name)
         try:
             return _query_last_ingested(coll)
         finally:
@@ -146,21 +159,26 @@ def known_payload(
     settings: Settings | None = None,
     *,
     collection: Any | None = None,
+    collection_name: str | None = None,
 ) -> dict[str, Any]:
     """JSON body for ``GET /known`` (MongoDB-backed).
 
     Pass ``collection`` to reuse an already-open pooled connection instead of
-    opening (and closing) two fresh MongoDB connections per call.
+    opening (and closing) two fresh MongoDB connections per call. Pass
+    ``collection_name`` (e.g. ``profile_<userid>``) to scope a reconnect to a
+    specific per-profile collection when no pooled ``collection`` is available.
     """
     settings = settings or Settings.from_env()
-    urls = mongo_known_urls(settings, collection=collection)
+    urls = mongo_known_urls(settings, collection=collection, collection_name=collection_name)
     canonical = sorted({canonical_answer_url(u) for u in urls})
     keys = sorted({slug for u in canonical if (slug := answer_slug(u))})
     return {
         "urls": canonical,
         "keys": keys,
         "count": len(canonical),
-        "last_ingested": mongo_last_ingested(settings, collection=collection),
+        "last_ingested": mongo_last_ingested(
+            settings, collection=collection, collection_name=collection_name
+        ),
     }
 
 

@@ -7,7 +7,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from quorascrapper.config import Settings
-from quorascrapper.filter.core import normalize_row, profile_userid, url_hash
+from quorascrapper.filter.core import (
+    normalize_row,
+    profile_collection_name,
+    profile_userid,
+    url_hash,
+)
 from quorascrapper.messaging.kafka import KafkaSender
 from quorascrapper.ops.ingest_idempotency import plan_idempotent_ingest
 from quorascrapper.ops.known_urls import known_payload
@@ -124,14 +129,47 @@ class ServeState:
                 self._mongo_client = None
                 self._mongo_collection = None
 
-    def known_snapshot(self) -> dict[str, Any]:
-        return known_payload(settings=self.settings, collection=self._mongo_collection)
+    def _resolve_collection(
+        self,
+        *,
+        profile_url: str | None = None,
+        userid: str | None = None,
+    ) -> tuple[Any | None, str | None]:
+        """Resolve the ``(collection, collection_name)`` to read dedup/known from.
+
+        Scopes to the profile's own ``profile_<userid>`` collection when a
+        ``profile_url``/``userid`` is given; otherwise returns the default
+        ("answers") pooled collection and ``None`` name (global behavior).
+
+        When a pooled Mongo connection exists, returns the concrete per-profile
+        collection object off the same client. When it does not (degraded
+        reconnect-per-call path), returns ``(None, name)`` so the lookup helpers
+        still scope their reconnect via ``collection_name``.
+        """
+        if not userid and profile_url:
+            userid = profile_userid(str(profile_url))
+        if not userid:
+            return self._mongo_collection, None
+        name = profile_collection_name(userid)
+        if self._mongo_collection is not None:
+            return self._mongo_collection.database[name], name
+        return None, name
+
+    def known_snapshot(self, *, profile_url: str | None = None) -> dict[str, Any]:
+        collection, collection_name = self._resolve_collection(profile_url=profile_url)
+        return known_payload(
+            settings=self.settings,
+            collection=collection,
+            collection_name=collection_name,
+        )
 
     def classify_answers(
         self,
         raw_rows: list[dict[str, Any]],
         *,
         force: bool = False,
+        profile_url: str | None = None,
+        userid: str | None = None,
     ) -> ClassifyReport:
         errors = validate_check_settings(self.settings)
         if errors:
@@ -141,8 +179,15 @@ class ServeState:
         if not rows:
             return ClassifyReport(0, 0, 0, [], [])
 
+        collection, collection_name = self._resolve_collection(
+            profile_url=profile_url, userid=userid
+        )
         plan = plan_idempotent_ingest(
-            rows, self.settings, force=force, collection=self._mongo_collection
+            rows,
+            self.settings,
+            force=force,
+            collection=collection,
+            collection_name=collection_name,
         )
         publish_hashes = {row["hash"] for row in plan.to_publish}
         new_rows = [row for row in rows if row["hash"] in publish_hashes]
@@ -161,11 +206,15 @@ class ServeState:
         raw_rows: list[dict[str, Any]],
         *,
         force: bool = False,
+        profile_url: str | None = None,
+        userid: str | None = None,
     ) -> PublishReport:
         if self.sender is None:
             raise RuntimeError("ServeState is not connected")
 
-        report = self.classify_answers(raw_rows, force=force)
+        report = self.classify_answers(
+            raw_rows, force=force, profile_url=profile_url, userid=userid
+        )
         if not report.new:
             return PublishReport(
                 0,

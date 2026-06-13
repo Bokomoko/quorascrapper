@@ -204,14 +204,18 @@
     return !!(curl && known.byUrl[curl]);
   }
 
-  function loadKnownLookup() {
+  function loadKnownLookup(profileUrl) {
     return new Promise(function (resolve) {
       if (!window.qsbkServeConfig) {
         resolve(buildKnownLookup({}));
         return;
       }
+      // Scope the known set to THIS profile's own collection so a re-scrape
+      // only skips answers already saved for this profile (not the global
+      // legacy "answers" collection). serve canonicalizes the URL.
+      var scopeUrl = profileUrl || location.href;
       window.qsbkServeConfig.getServeBase(function (base) {
-        var knownUrl = window.qsbkServeConfig.serveUrls(base).known;
+        var knownUrl = window.qsbkServeConfig.knownUrl(base, scopeUrl);
         fetch(knownUrl, { cache: "no-store" })
           .then(function (response) {
             return response.ok ? response.json() : null;
@@ -700,7 +704,14 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           cache: "no-store",
-          body: JSON.stringify({ answers: batch, force: force }),
+          // Top-level profile_url scopes serve's publish-side dedup to this
+          // profile's own collection (force=false re-scrapes); per-row
+          // profile_url still drives subscriber routing.
+          body: JSON.stringify({
+            answers: batch,
+            force: force,
+            profile_url: profileFields.profile_url || undefined,
+          }),
         });
         if (resp.ok) {
           var body = await resp.json();
@@ -1097,7 +1108,7 @@
     var resumeAfterKey = msg.resumeAfterKey || null;
     var mode = msg.mode === "graphql" ? "graphql" : "scroll";
 
-    loadKnownLookup()
+    loadKnownLookup(msg.profile_url || location.href)
       .then(function (known) {
         if (mode === "graphql") {
           return collectViaGraphql(maxResults, {

@@ -7,6 +7,7 @@ import json
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from quorascrapper.config import Settings, load_project_env
 from quorascrapper.ops.serve_store import ClassifyReport, PublishReport, ServeState, validate_serve_settings
@@ -73,7 +74,8 @@ class QsbkHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
-        path = self.path.split("?", 1)[0]
+        parsed = urlsplit(self.path)
+        path = parsed.path
         if path in ("/health", "/ping"):
             self._json_response(
                 200,
@@ -90,7 +92,10 @@ class QsbkHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        self._json_response(200, self.state.known_snapshot())
+        # Optional ?profile_url=<encoded> scopes known/dedup to that profile's
+        # own collection; absent → global default ("answers") behavior.
+        profile_url = (parse_qs(parsed.query).get("profile_url") or [None])[0]
+        self._json_response(200, self.state.known_snapshot(profile_url=profile_url))
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
@@ -111,10 +116,16 @@ class QsbkHandler(BaseHTTPRequestHandler):
             return
 
         force = bool(data.get("force", False))
+        # Optional profile identity scopes dedup to the profile's own
+        # collection; absent → global default ("answers") behavior.
+        profile_url = data.get("profile_url") or None
+        userid = data.get("userid") or None
 
         if path == "/check":
             try:
-                report: ClassifyReport = self.state.classify_answers(answers, force=force)
+                report: ClassifyReport = self.state.classify_answers(
+                    answers, force=force, profile_url=profile_url, userid=userid
+                )
             except Exception as exc:
                 print(f"[qsbk serve] POST /check failed: {exc}", file=sys.stderr)
                 self._json_response(503, {"error": str(exc)})
@@ -128,7 +139,9 @@ class QsbkHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            report: PublishReport = self.state.publish_answers(answers, force=force)
+            report: PublishReport = self.state.publish_answers(
+                answers, force=force, profile_url=profile_url, userid=userid
+            )
         except Exception as exc:
             print(f"[qsbk serve] POST {path} failed: {exc}", file=sys.stderr)
             self._json_response(503, {"error": str(exc)})
