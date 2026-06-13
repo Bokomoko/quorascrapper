@@ -155,6 +155,7 @@
   var statSaved = document.getElementById("stat-saved");
   var statNew = document.getElementById("stat-new");
   var statTotal = document.getElementById("stat-total");
+  var statTotalCell = document.getElementById("stat-total-cell");
   var sessionElapsed = document.getElementById("session-elapsed");
   var sessionRate = document.getElementById("session-rate");
   var sessionEta = document.getElementById("session-eta");
@@ -1010,8 +1011,12 @@
     return totals;
   }
 
-  if (statTotal) {
-    statTotal.addEventListener("click", function () {
+  // Click anywhere on the "Total" stat cell (number or label) to copy the
+  // profile's total answer count into the Max-new-answers input. Works whether
+  // or not a session is active; no-op until the total has been resolved.
+  var totalClickTarget = statTotalCell || statTotal;
+  if (totalClickTarget) {
+    totalClickTarget.addEventListener("click", function () {
       applyProfileTotalToMax();
     });
   }

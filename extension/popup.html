@@ -108,9 +108,12 @@
       }
       .stat-total-num {
         color: #6b7280;
+      }
+      /* Whole "Total" cell is the click target: click-to-fill the Max input. */
+      .stat-total-cell {
         cursor: pointer;
       }
-      .stat-total-num:hover {
+      .stat-total-cell:hover .stat-total-num {
         color: #1d4ed8;
         text-decoration: underline;
         text-decoration-style: dotted;
@@ -213,14 +216,8 @@
             <div class="stat-num stat-new-num" id="stat-new">—</div>
             <div class="stat-label">New</div>
           </div>
-          <div class="stat">
-            <div
-              class="stat-num stat-total-num"
-              id="stat-total"
-              title="Click to set max answers"
-            >
-              —
-            </div>
+          <div class="stat stat-total-cell" id="stat-total-cell" title="Click to set max">
+            <div class="stat-num stat-total-num" id="stat-total">—</div>
             <div class="stat-label">Total</div>
           </div>
         </div>
