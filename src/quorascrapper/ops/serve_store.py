@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from quorascrapper.config import Settings
-from quorascrapper.filter.core import normalize_row, url_hash
+from quorascrapper.filter.core import normalize_row, profile_userid, url_hash
 from quorascrapper.messaging.kafka import KafkaSender
 from quorascrapper.ops.ingest_idempotency import plan_idempotent_ingest
 from quorascrapper.ops.known_urls import known_payload
@@ -182,8 +182,18 @@ class ServeState:
             "seen_at",
             "answer_text",
             "aid",
+            # Readable profile identity fields carried through to Kafka/Mongo.
+            "profile_name",
+            "profile_url",
+            "profile_display_name",
         )
-        num_keys = ("num_upvotes", "num_views", "num_comments", "creation_time")
+        num_keys = (
+            "num_upvotes",
+            "num_views",
+            "num_comments",
+            "creation_time",
+            "profile_answer_count",
+        )
         for row in report.new:
             payload: dict[str, Any] = {"url": row["url"]}
             if row.get("hash"):
@@ -194,6 +204,13 @@ class ServeState:
             for key in num_keys:
                 if row.get(key) is not None:
                     payload[key] = row[key]
+            # Derive a stable per-profile userid server-side from the canonical
+            # profile URL; the subscriber routes by this (collection profile_<userid>).
+            profile_url = row.get("profile_url")
+            if profile_url:
+                payload["userid"] = profile_userid(str(profile_url))
+            elif row.get("userid"):
+                payload["userid"] = row["userid"]
             self.sender.send(payload)
             published_urls.append(row["url"])
         self.sender.flush()

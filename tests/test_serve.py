@@ -3,7 +3,7 @@ import threading
 from http.client import HTTPConnection
 from unittest.mock import MagicMock, patch
 
-from quorascrapper.filter.core import url_hash
+from quorascrapper.filter.core import profile_userid, url_hash
 from quorascrapper.ops.serve import QsbkHandler, QsbkHTTPServer
 from quorascrapper.ops.serve_store import ServeState
 
@@ -137,6 +137,59 @@ def test_upsert_endpoint_publishes_to_kafka():
         assert body["published"] == 1
         mock_sender.send.assert_called_once()
         mock_sender.flush.assert_called_once()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_upsert_derives_userid_and_publishes_profile_fields():
+    mock_sender = MagicMock()
+    state = ServeState(settings=MagicMock(mongodb_uri="mongodb://localhost"))
+    state.sender = mock_sender
+
+    url = "https://pt.quora.com/profile/alice/answer/new"
+    # Extension sends the /answers tab URL; serve must canonicalize before hashing.
+    profile_url = "https://pt.quora.com/profile/alice/answers"
+    server, port, thread = _start_server(state)
+    try:
+        payload = json.dumps(
+            {
+                "answers": [
+                    {
+                        "url": url,
+                        "hash": url_hash(url),
+                        "profile_name": "alice",
+                        "profile_url": profile_url,
+                        "profile_display_name": "Alice A.",
+                        "profile_answer_count": 42,
+                    }
+                ]
+            }
+        )
+        conn = HTTPConnection("127.0.0.1", port, timeout=5)
+        with patch("quorascrapper.ops.ingest_idempotency.mongo_known_hashes", return_value=set()):
+            conn.request(
+                "POST",
+                "/upsert",
+                body=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            response = conn.getresponse()
+            body = json.loads(response.read().decode("utf-8"))
+        conn.close()
+
+        assert response.status == 200
+        assert body["published"] == 1
+        sent = mock_sender.send.call_args[0][0]
+        assert sent["profile_name"] == "alice"
+        assert sent["profile_url"] == profile_url
+        assert sent["profile_display_name"] == "Alice A."
+        assert sent["profile_answer_count"] == 42
+        # userid derived from the CANONICAL profile url (suffix stripped)
+        assert sent["userid"] == profile_userid(profile_url)
+        assert sent["userid"] == profile_userid("https://pt.quora.com/profile/alice")
+        assert "profile_collection" not in sent
     finally:
         server.shutdown()
         server.server_close()

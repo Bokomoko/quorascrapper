@@ -16,7 +16,7 @@ from pymongo.errors import PyMongoError  # type: ignore
 
 from quorascrapper.config import Settings
 from quorascrapper.logging_setup import init_logging
-from quorascrapper.subscriber.storage import connect_mongo, ensure_indexes, upsert_answer
+from quorascrapper.subscriber.storage import MongoRouter, connect_router
 
 logger = init_logging("subscriber")
 
@@ -32,7 +32,7 @@ class KafkaMongoSubscriber:
 
         self.consumer: Optional[Consumer] = None
         self.mongo_client = None
-        self.mongo_collection = None
+        self.router: Optional[MongoRouter] = None
 
         self.messages_processed = 0
         self.messages_stored = 0
@@ -58,14 +58,14 @@ class KafkaMongoSubscriber:
         )
 
     def setup_mongodb_connection(self) -> None:
-        self.mongo_client, self.mongo_collection = connect_mongo(self.settings)
-        ensure_indexes(self.mongo_collection)
+        self.mongo_client, self.router = connect_router(self.settings)
         logger.info(
             "mongodb_connected",
             extra={
                 "event": "mongodb_connected",
                 "database": self.settings.mongodb_database,
-                "collection": self.settings.mongodb_collection,
+                "fallback_collection": self.settings.mongodb_collection,
+                "routing": "per_profile",
             },
         )
 
@@ -86,7 +86,7 @@ class KafkaMongoSubscriber:
             return "skipped"
 
         try:
-            upsert_answer(self.mongo_collection, data)
+            self.router.store(data)
         except PyMongoError as exc:
             logger.error("mongodb_error", extra={"event": "mongodb_error", "error": str(exc)})
             self.errors_count += 1

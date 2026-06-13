@@ -65,7 +65,8 @@
     });
   }
 
-  function rowsForServe(rows) {
+  function rowsForServe(rows, identity) {
+    identity = identity || {};
     return rows.map(function (row) {
       var out = { url: row.answer_url || row.url };
       if (row.question_title) out.question_title = row.question_title;
@@ -79,6 +80,20 @@
       if (row.num_views != null) out.num_views = row.num_views;
       if (row.num_comments != null) out.num_comments = row.num_comments;
       if (row.creation_time != null) out.creation_time = row.creation_time;
+      // Profile identity: prefer the per-row stamp from collectViaGraphql,
+      // fall back to the popup-derived identity (covers scroll mode too).
+      // serve derives userid from profile_url; we don't send a collection name.
+      var pn = row.profile_name || identity.profile_name;
+      if (pn) out.profile_name = pn;
+      var pu = row.profile_url || identity.profile_url;
+      if (pu) out.profile_url = pu;
+      var pac =
+        row.profile_answer_count != null
+          ? row.profile_answer_count
+          : identity.profile_answer_count;
+      if (pac != null) out.profile_answer_count = pac;
+      var pdn = row.profile_display_name || identity.profile_display_name;
+      if (pdn) out.profile_display_name = pdn;
       return out;
     });
   }
@@ -522,6 +537,40 @@
     }
   }
 
+  // The raw profile slug from /profile/<slug>(/answers). Kept URL-encoded here;
+  // profile_name decodes it for readability.
+  function profileSlugFromUrl(url) {
+    try {
+      var u = new URL(url);
+      var m = u.pathname.match(/\/profile\/([^/]+)/);
+      return m ? m[1] : "";
+    } catch (e) {
+      return "";
+    }
+  }
+
+  // Derive the readable profile identity stamped onto every answer payload.
+  // The collection name is NOT computed here: serve derives a stable userid
+  // (hash of the canonical profile_url) server-side and the subscriber routes
+  // by that. We just send the canonical /profile/<slug> URL + readable fields.
+  function buildProfileIdentity(tabUrl, total) {
+    var profileUrl = profileUrlFromAnswers(tabUrl);
+    var slug = profileSlugFromUrl(profileUrl || tabUrl);
+    var name = slug;
+    try {
+      name = decodeURIComponent(slug);
+    } catch (e) {
+      /* keep raw slug */
+    }
+    var ident = {};
+    if (name) ident.profile_name = name;
+    if (profileUrl) ident.profile_url = profileUrl;
+    if (total != null && !isNaN(total)) {
+      ident.profile_answer_count = Math.floor(total);
+    }
+    return ident;
+  }
+
   function waitForTabLoad(tabId, timeoutMs) {
     return new Promise(function (resolve, reject) {
       chrome.tabs.get(tabId, function (tab) {
@@ -875,15 +924,15 @@
     }
   }
 
-  async function publishNewToKafka(newRows, force) {
+  async function publishNewToKafka(newRows, force, identity) {
     if (!newRows.length) {
       return { published: 0, skipped: 0, skipped_mongo: 0 };
     }
-    return sendToKafka(newRows, force);
+    return sendToKafka(newRows, force, identity);
   }
 
-  async function sendToKafka(rows, force) {
-    var batches = chunk(rowsForServe(rows), SERVE_BATCH);
+  async function sendToKafka(rows, force, identity) {
+    var batches = chunk(rowsForServe(rows, identity), SERVE_BATCH);
     var totals = { published: 0, skipped: 0, skipped_mongo: 0, urls: [] };
     console.info(
       "[qsbk] POST /upsert",
@@ -998,6 +1047,7 @@
       // publishing at the end. Survives interruptions and bounds memory.
       var streamPublish = method === "graphql" && output === "kafka" && serveAvailable;
       var profileUrl = profileUrlFromAnswers(tab.url);
+      var profileIdentity = buildProfileIdentity(tab.url, profileState.total);
       var cursor = profileUrl ? await readProfileCursor(profileUrl) : null;
       var response = await chrome.tabs.sendMessage(tab.id, {
         type: "startScrape",
@@ -1007,6 +1057,12 @@
         resumeAfterKey: force ? null : cursor && cursor.afterKey ? cursor.afterKey : null,
         serveUpsertUrl: streamPublish ? SERVE_UPSERT : null,
         force: force,
+        profile_name: profileIdentity.profile_name || null,
+        profile_url: profileIdentity.profile_url || null,
+        profile_answer_count:
+          profileIdentity.profile_answer_count != null
+            ? profileIdentity.profile_answer_count
+            : null,
       });
 
       if (!response || !response.ok) {
@@ -1117,7 +1173,7 @@
       } else if (output === "kafka") {
         if (exportRows.length) {
           setStatus("Sending " + exportRows.length + " new answers to Kafka…");
-          var publishReport = await publishNewToKafka(exportRows, force);
+          var publishReport = await publishNewToKafka(exportRows, force, profileIdentity);
           if (publishReport.published != null) {
             meta.session_new_count = publishReport.published;
             session.newCount = publishReport.published;

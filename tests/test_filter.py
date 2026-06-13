@@ -1,14 +1,14 @@
-import csv
 import json
 
 from quorascrapper.filter.core import (
+    canonical_profile_url,
     dedupe_rows,
     load_export,
     normalize_row,
     parse_csv,
     parse_jsonl,
+    profile_userid,
     to_csv,
-    to_jsonl,
     url_hash,
 )
 
@@ -88,6 +88,55 @@ def test_load_export_json_document(tmp_path):
     assert len(rows) == 1
     assert rows[0]["url"] == "https://pt.quora.com/answer/abc"
     assert rows[0]["question_title"] == "What is X?"
+
+
+def test_normalize_row_passes_through_profile_fields():
+    row = normalize_row(
+        {
+            "url": "https://pt.quora.com/profile/alice/answer/1",
+            "userid": "deadbeef",
+            "profile_name": "alice",
+            "profile_url": "https://pt.quora.com/profile/alice",
+            "profile_display_name": "Alice A.",
+            "profile_answer_count": 42,
+        }
+    )
+    assert row is not None
+    assert row["userid"] == "deadbeef"
+    assert row["profile_name"] == "alice"
+    assert row["profile_url"] == "https://pt.quora.com/profile/alice"
+    assert row["profile_display_name"] == "Alice A."
+    assert row["profile_answer_count"] == 42
+
+
+def test_canonical_profile_url_normalizes_variants():
+    base = "https://pt.quora.com/profile/Alice-Silva"
+    assert canonical_profile_url(base) == base
+    assert canonical_profile_url(base + "/answers") == base
+    assert canonical_profile_url(base + "/answers/") == base
+    assert canonical_profile_url(base + "/questions") == base
+    assert canonical_profile_url(base + "/") == base
+    assert canonical_profile_url(base + "?foo=1#frag") == base
+    # host lowercased + scheme forced to https
+    assert canonical_profile_url("http://PT.Quora.com/profile/Alice-Silva") == base
+    # scheme-less input is handled best-effort
+    assert canonical_profile_url("pt.quora.com/profile/Alice-Silva/answers") == base
+    assert canonical_profile_url("") == ""
+
+
+def test_profile_userid_is_stable_across_variants():
+    base = "https://pt.quora.com/profile/Alice-Silva"
+    uid = profile_userid(base)
+    assert uid == url_hash(base)
+    assert len(uid) == 32
+    assert profile_userid(base + "/answers") == uid
+    assert profile_userid(base + "/answers/") == uid
+    assert profile_userid(base + "/") == uid
+    assert profile_userid("http://PT.Quora.com/profile/Alice-Silva") == uid
+    # different profile -> different userid
+    assert profile_userid("https://pt.quora.com/profile/Bob") != uid
+    # path case is significant (Quora slugs are case-sensitive)
+    assert profile_userid("https://pt.quora.com/profile/alice-silva") != uid
 
 
 def test_to_csv_roundtrip():

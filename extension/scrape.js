@@ -405,6 +405,19 @@
 
   window.qsbkExtractProfileStats = extractProfileStats;
 
+  // Best-effort human display name for the profile (optional). Reads og:title
+  // or the document title and strips the trailing " - Quora"/" | Quora" suffix.
+  function extractProfileDisplayName() {
+    var title = "";
+    var meta = document.querySelector('meta[property="og:title"]');
+    if (meta) title = meta.getAttribute("content") || "";
+    if (!title) title = document.title || "";
+    title = title.replace(/\s*[-|]\s*Quora\s*$/i, "").trim();
+    return title || "";
+  }
+
+  window.qsbkExtractProfileDisplayName = extractProfileDisplayName;
+
   function findLoadMoreButton() {
     var candidates = document.querySelectorAll("button, a, div[role='button']");
     for (var i = 0; i < candidates.length; i++) {
@@ -651,6 +664,18 @@
     var streaming = !!serveUpsertUrl;
     var force = !!options.force;
 
+    // Readable profile identity stamped onto every record. serve derives the
+    // routing userid from profile_url server-side, so we send no collection
+    // name here. name/url/count come from the popup (startScrape message);
+    // display name is read here from the live page DOM.
+    var profileFields = {};
+    if (options.profile_name) profileFields.profile_name = options.profile_name;
+    if (options.profile_url) profileFields.profile_url = options.profile_url;
+    if (options.profile_answer_count != null)
+      profileFields.profile_answer_count = options.profile_answer_count;
+    var displayName = extractProfileDisplayName();
+    if (displayName) profileFields.profile_display_name = displayName;
+
     var seen = {};
     var rowsOut = streaming ? null : [];
     var publishBuffer = [];
@@ -752,6 +777,7 @@
         if (collected >= maxResults) break;
         var record = mapNodeToRecord(edges[i] && edges[i].node);
         if (!record) continue;
+        Object.assign(record, profileFields);
         deepestUrl = record.url;
         if (seen[record.url]) continue;
         if (skipKnown && gqlIsKnown(record.url, known)) {
@@ -1081,6 +1107,10 @@
             pageSize: msg.pageSize || null,
             serveUpsertUrl: msg.serveUpsertUrl || null,
             force: !!msg.force,
+            profile_name: msg.profile_name || null,
+            profile_url: msg.profile_url || null,
+            profile_answer_count:
+              msg.profile_answer_count != null ? msg.profile_answer_count : null,
           });
         }
         return scrollAndCollect(maxResults, {

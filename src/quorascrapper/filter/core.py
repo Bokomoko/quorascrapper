@@ -9,12 +9,46 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import urlsplit, urlunsplit
 
 _PROFILE_ANSWER_RE = re.compile(r"/profile/[^/]+/answer/\d+", re.IGNORECASE)
+
+# Profile tab suffixes appended to /profile/<slug> that must be stripped so a
+# profile maps to a single canonical URL (and therefore a single userid).
+_PROFILE_TAB_SUFFIX_RE = re.compile(
+    r"/(answers|questions|posts|followers|following|spaces|shares|edits|"
+    r"activity|knows-about|topics|tribes|likes)/?$",
+    re.IGNORECASE,
+)
 
 
 def url_hash(url: str) -> str:
     return hashlib.blake2s(str(url).encode("utf-8"), digest_size=16).hexdigest()
+
+
+def canonical_profile_url(url: str) -> str:
+    """Canonicalize a Quora profile URL so a profile maps to one stable userid.
+
+    Forces ``https``, lowercases the host, drops query/fragment, strips a
+    trailing profile tab suffix (``/answers``, ``/questions``, ...) and any
+    trailing slash. The path case is preserved (Quora slugs are case-sensitive).
+    Returns ``""`` for empty input and best-effort cleans scheme-less input.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = "https://" + raw
+    parts = urlsplit(raw)
+    netloc = (parts.netloc or "").lower()
+    path = _PROFILE_TAB_SUFFIX_RE.sub("", parts.path or "")
+    path = path.rstrip("/")
+    return urlunsplit(("https", netloc, path, "", ""))
+
+
+def profile_userid(profile_url: str) -> str:
+    """Stable per-profile id: blake2s hash of the canonical profile URL."""
+    return url_hash(canonical_profile_url(profile_url))
 
 
 def answer_url_kind(url: str) -> str:
@@ -29,6 +63,12 @@ def answer_url_kind(url: str) -> str:
 
 # Optional richer fields captured by the GraphQL extension method. Strings are
 # copied as-is; numeric fields are preserved as numbers (0 is meaningful).
+#
+# Profile identity fields are stamped onto every answer by the extension so the
+# subscriber can route docs into a per-profile collection and maintain a
+# profiles registry. ``profile_url``/``profile_name``/``profile_display_name``
+# are readable fields; ``userid`` (the stable hash of the canonical profile URL)
+# is derived server-side in serve but also passed through if already present.
 _PASSTHROUGH_STR = (
     "seen_at",
     "question_title",
@@ -36,8 +76,18 @@ _PASSTHROUGH_STR = (
     "question_url",
     "answer_text",
     "aid",
+    "userid",
+    "profile_name",
+    "profile_url",
+    "profile_display_name",
 )
-_PASSTHROUGH_NUM = ("num_upvotes", "num_views", "num_comments", "creation_time")
+_PASSTHROUGH_NUM = (
+    "num_upvotes",
+    "num_views",
+    "num_comments",
+    "creation_time",
+    "profile_answer_count",
+)
 
 
 def normalize_row(row: dict[str, Any]) -> dict[str, Any] | None:
