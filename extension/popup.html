@@ -109,16 +109,6 @@
       .stat-total-num {
         color: #6b7280;
       }
-      /* Whole "Total" cell is the click target: click-to-fill the Max input. */
-      .stat-total-cell {
-        cursor: pointer;
-      }
-      .stat-total-cell:hover .stat-total-num {
-        color: #1d4ed8;
-        text-decoration: underline;
-        text-decoration-style: dotted;
-        text-underline-offset: 2px;
-      }
       #session-detail {
         display: none;
       }
@@ -216,7 +206,7 @@
             <div class="stat-num stat-new-num" id="stat-new">—</div>
             <div class="stat-label">New</div>
           </div>
-          <div class="stat stat-total-cell" id="stat-total-cell" title="Click to set max">
+          <div class="stat" id="stat-total-cell">
             <div class="stat-num stat-total-num" id="stat-total">—</div>
             <div class="stat-label">Total</div>
           </div>
@@ -262,6 +252,7 @@
       <div id="status">Open a Quora profile <code>/answers</code> page (logged in).</div>
       <p class="hint">
         Drag the panel header on the page to move it. With serve online, skips known answers and resumes from the last saved scroll position.<br />
+        Max is prefilled with the profile's answer total once it loads; change it before scraping if you want fewer.<br />
         Green ✓ badges poll <code>/known</code> every few seconds after ingest.
       </p>
       <div id="ext-version-footer"></div>

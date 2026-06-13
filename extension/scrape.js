@@ -409,6 +409,44 @@
 
   window.qsbkExtractProfileStats = extractProfileStats;
 
+  // Small, unobtrusive on-page badge showing the profile's total answer count
+  // (the same figure the popup surfaces as "Total"). Quora renders the count
+  // into og:description/DOM, so this reads it straight from the live page.
+  var ANSWER_COUNT_BADGE_ID = "qsbk-answer-count";
+
+  function renderProfileAnswerCount() {
+    var stats = extractProfileStats();
+    var count = stats && stats.answers;
+    if (count == null || isNaN(count)) return false;
+    var el = document.getElementById(ANSWER_COUNT_BADGE_ID);
+    if (!el) {
+      el = document.createElement("div");
+      el.id = ANSWER_COUNT_BADGE_ID;
+      el.style.cssText =
+        "position:fixed;left:12px;bottom:12px;z-index:2147483645;" +
+        "background:#059669;color:#fff;font:600 12px/1.3 system-ui,sans-serif;" +
+        "padding:6px 10px;border-radius:14px;box-shadow:0 2px 8px rgba(0,0,0,.25);" +
+        "pointer-events:none;user-select:none;";
+      document.documentElement.appendChild(el);
+    }
+    el.textContent = "qsbk · " + Number(count).toLocaleString() + " answers";
+    return true;
+  }
+
+  window.qsbkRenderProfileAnswerCount = renderProfileAnswerCount;
+
+  // The answer count may not be in the DOM/meta on first paint; retry briefly.
+  if (location.href.indexOf("/answers") !== -1) {
+    var answerCountTries = 0;
+    var answerCountTimer = setInterval(function () {
+      answerCountTries += 1;
+      if (renderProfileAnswerCount() || answerCountTries >= 10) {
+        clearInterval(answerCountTimer);
+      }
+    }, 1000);
+    renderProfileAnswerCount();
+  }
+
   // Best-effort human display name for the profile (optional). Reads og:title
   // or the document title and strips the trailing " - Quora"/" | Quora" suffix.
   function extractProfileDisplayName() {

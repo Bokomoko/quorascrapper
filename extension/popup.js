@@ -155,7 +155,6 @@
   var statSaved = document.getElementById("stat-saved");
   var statNew = document.getElementById("stat-new");
   var statTotal = document.getElementById("stat-total");
-  var statTotalCell = document.getElementById("stat-total-cell");
   var sessionElapsed = document.getElementById("session-elapsed");
   var sessionRate = document.getElementById("session-rate");
   var sessionEta = document.getElementById("session-eta");
@@ -207,6 +206,10 @@
     saved: null,
     fetchPromise: null,
   };
+
+  // Tracks whether the Max input has already been auto-filled for the current
+  // profile, so we prefill exactly once per profile (reset on profile change).
+  var maxAutoFilled = false;
 
   // Canonical-ish profile URL for the tab currently in view. Used to scope
   // known/check/saved lookups to this profile's own collection so dedup never
@@ -261,12 +264,17 @@
     }
   }
 
-  // "New (this session)" figure for the stats grid. Prefer the dedup/publish
-  // count when known, otherwise the raw collected count. Dash before a run.
+  // Numeric "new this session": the dedup/publish count when known, otherwise
+  // the raw collected count. Single source of truth so the "New" stat and the
+  // "X of Y target" progress line can never disagree.
+  function sessionNewCount() {
+    return session.newCount != null ? session.newCount : session.found || 0;
+  }
+
+  // "New (this session)" figure for the stats grid. Dash before a run.
   function sessionNewDisplay() {
     if (session.startedAt == null) return "—";
-    var n = session.newCount != null ? session.newCount : session.found || 0;
-    return formatCount(n);
+    return formatCount(sessionNewCount());
   }
 
   // Repaint the three stat numbers (Saved / New / Total). `loading` shows a
@@ -284,6 +292,7 @@
     if (statTotal) {
       if (profileState.total != null) {
         statTotal.textContent = formatCount(profileState.total);
+        prefillMaxFromTotal();
       } else {
         statTotal.textContent = loading ? "…" : "—";
       }
@@ -295,7 +304,9 @@
     if (!sessionExtra) return;
     var bits = [];
     if (session.startedAt != null) {
-      bits.push(session.found + " of " + session.max + " target");
+      bits.push(
+        formatCount(sessionNewCount()) + " of " + formatCount(session.max) + " target"
+      );
     }
     if (session.skippedCount != null && session.skippedCount > 0) {
       bits.push(formatCount(session.skippedCount) + " already saved");
@@ -677,11 +688,15 @@
     return null;
   }
 
-  function applyProfileTotalToMax() {
+  // Auto-fill the Max input with the profile's total once it resolves. One-shot
+  // per profile so a later stats repaint never clobbers a value the user typed,
+  // and never fights an in-progress session. Falls back to the HTML default
+  // (100) until the total is known.
+  function prefillMaxFromTotal() {
+    if (maxAutoFilled || session.active) return;
     if (profileState.total == null || isNaN(profileState.total)) return;
-    var n = Math.max(1, Math.floor(profileState.total));
-    maxEl.value = String(n);
-    setStatus("Max set to " + n + " (profile total)");
+    maxEl.value = String(Math.max(1, Math.floor(profileState.total)));
+    maxAutoFilled = true;
   }
 
   function profileSavedDisplay() {
@@ -702,6 +717,7 @@
     profileState.total = null;
     profileState.saved = null;
     activeProfileUrl = null;
+    maxAutoFilled = false;
   }
 
   function readProfileCache(profileUrl) {
@@ -741,6 +757,7 @@
     if (!tab || !tab.url) return null;
     var profileUrl = profileUrlFromAnswers(tab.url);
     if (!profileUrl) return null;
+    if (profileUrl !== activeProfileUrl) maxAutoFilled = false;
     activeProfileUrl = profileUrl;
 
     var cached = await readProfileCache(profileUrl);
@@ -1009,16 +1026,6 @@
     }
     console.info("[qsbk] /upsert done", totals);
     return totals;
-  }
-
-  // Click anywhere on the "Total" stat cell (number or label) to copy the
-  // profile's total answer count into the Max-new-answers input. Works whether
-  // or not a session is active; no-op until the total has been resolved.
-  var totalClickTarget = statTotalCell || statTotal;
-  if (totalClickTarget) {
-    totalClickTarget.addEventListener("click", function () {
-      applyProfileTotalToMax();
-    });
   }
 
   async function initPanel() {
