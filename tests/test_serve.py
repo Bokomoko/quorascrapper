@@ -85,6 +85,97 @@ def test_known_endpoint_returns_urls():
         thread.join(timeout=2)
 
 
+def test_known_count_only_endpoint_scoped_and_fallback():
+    """GET /known?count_only=1 returns just a count, scoped per profile.
+
+    (a) with profile_url → count of that profile's own collection only;
+    (b) without profile_url → fallback to the default ("answers") collection;
+    and the count-only response must NOT carry the URL/key arrays.
+    """
+    state, db = _mongomock_state()
+
+    profile_a = "https://pt.quora.com/profile/_qsbk_counttest_A/answers"
+    name_a = profile_collection_name(profile_userid(profile_a))
+    for slug in ("aaa", "bbb", "ccc"):
+        url = f"https://pt.quora.com/profile/_qsbk_counttest_A/answer/{slug}"
+        db[name_a].insert_one({"url": url, "hash": url_hash(url)})
+
+    # Default ("answers") collection holds an unrelated legacy doc.
+    url_legacy = "https://pt.quora.com/profile/legacy/answer/zzz"
+    db["answers"].insert_one({"url": url_legacy, "hash": url_hash(url_legacy)})
+
+    server, port, thread = _start_server(state)
+    try:
+        # (a) scoped to profile A → its own 3 docs, count only.
+        conn = HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request(
+            "GET",
+            "/known?count_only=1&profile_url="
+            + "https%3A%2F%2Fpt.quora.com%2Fprofile%2F_qsbk_counttest_A%2Fanswers",
+        )
+        response = conn.getresponse()
+        body = json.loads(response.read().decode("utf-8"))
+        conn.close()
+        assert response.status == 200
+        assert body == {"count": 3}
+        assert "urls" not in body and "keys" not in body
+
+        # (b) no profile_url → fallback to default "answers" collection.
+        conn = HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/known?count_only=1")
+        response = conn.getresponse()
+        body = json.loads(response.read().decode("utf-8"))
+        conn.close()
+        assert response.status == 200
+        assert body == {"count": 1}
+
+        # (c) counts=1 alias works too, for a never-seen profile → 0.
+        conn = HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request(
+            "GET",
+            "/known?counts=1&profile_url="
+            + "https%3A%2F%2Fpt.quora.com%2Fprofile%2F_qsbk_counttest_B",
+        )
+        response = conn.getresponse()
+        body = json.loads(response.read().decode("utf-8"))
+        conn.close()
+        assert response.status == 200
+        assert body == {"count": 0}
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_known_count_only_forwards_profile_url_to_saved_count():
+    """do_GET routes count_only to saved_count with the parsed profile_url."""
+    state = ServeState(settings=MagicMock(mongodb_uri="mongodb://localhost"))
+    captured = {}
+
+    def fake_saved_count(*, profile_url=None):
+        captured["profile_url"] = profile_url
+        return {"count": 7}
+
+    state.saved_count = fake_saved_count  # type: ignore[method-assign]
+    server, port, thread = _start_server(state)
+    try:
+        conn = HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request(
+            "GET",
+            "/known?count_only=1&profile_url=https%3A%2F%2Fpt.quora.com%2Fprofile%2Falice",
+        )
+        response = conn.getresponse()
+        body = json.loads(response.read().decode("utf-8"))
+        conn.close()
+        assert response.status == 200
+        assert body == {"count": 7}
+        assert captured["profile_url"] == "https://pt.quora.com/profile/alice"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_check_endpoint_classifies_against_mongo():
     settings = MagicMock(mongodb_uri="mongodb://localhost")
     state = ServeState(settings=settings)
@@ -247,6 +338,25 @@ def test_known_snapshot_scopes_to_profile_collection():
     snap_default = state.known_snapshot()
     assert snap_default["count"] == 1
     assert url_legacy in snap_default["urls"]
+
+
+def test_saved_count_scopes_to_profile_collection():
+    """ServeState.saved_count counts the profile's own collection, with fallback."""
+    state, db = _mongomock_state()
+
+    profile_a = "https://pt.quora.com/profile/_qsbk_savedcount_A/answers"
+    name_a = profile_collection_name(profile_userid(profile_a))
+    db[name_a].insert_one({"url": "u1", "hash": "h1"})
+    db[name_a].insert_one({"url": "u2", "hash": "h2"})
+    db["answers"].insert_one({"url": "legacy", "hash": "hz"})
+
+    assert state.saved_count(profile_url=profile_a) == {"count": 2}
+    # Never-published profile is isolated → 0.
+    assert state.saved_count(
+        profile_url="https://pt.quora.com/profile/_qsbk_savedcount_B"
+    ) == {"count": 0}
+    # No profile_url → default ("answers") collection.
+    assert state.saved_count() == {"count": 1}
 
 
 def test_classify_dedup_scoped_per_profile():

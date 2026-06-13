@@ -15,7 +15,7 @@ from quorascrapper.filter.core import (
 )
 from quorascrapper.messaging.kafka import KafkaSender
 from quorascrapper.ops.ingest_idempotency import plan_idempotent_ingest
-from quorascrapper.ops.known_urls import known_payload
+from quorascrapper.ops.known_urls import known_count_payload, known_payload
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +158,20 @@ class ServeState:
     def known_snapshot(self, *, profile_url: str | None = None) -> dict[str, Any]:
         collection, collection_name = self._resolve_collection(profile_url=profile_url)
         return known_payload(
+            settings=self.settings,
+            collection=collection,
+            collection_name=collection_name,
+        )
+
+    def saved_count(self, *, profile_url: str | None = None) -> dict[str, Any]:
+        """Cheap ``{"count": <int>}`` of docs persisted for this profile.
+
+        Scopes to the profile's own ``profile_<userid>`` collection (falls back
+        to the default ``answers`` collection when no ``profile_url``). Used by
+        the popup's periodic "saved" poll; avoids serializing the full URL list.
+        """
+        collection, collection_name = self._resolve_collection(profile_url=profile_url)
+        return known_count_payload(
             settings=self.settings,
             collection=collection,
             collection_name=collection_name,

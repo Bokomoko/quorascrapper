@@ -16,6 +16,17 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 MAX_BODY_BYTES = 10 * 1024 * 1024
 
+_FALSEY_FLAG_VALUES = {"", "0", "false", "no", "off"}
+
+
+def _query_flag(query: dict[str, list[str]], *names: str) -> bool:
+    """True when any of ``names`` is present in ``query`` with a truthy value."""
+    for name in names:
+        values = query.get(name)
+        if values and str(values[0]).strip().lower() not in _FALSEY_FLAG_VALUES:
+            return True
+    return False
+
 
 class QsbkHTTPServer(ThreadingHTTPServer):
     def __init__(self, server_address, RequestHandlerClass, state: ServeState):
@@ -94,7 +105,13 @@ class QsbkHandler(BaseHTTPRequestHandler):
 
         # Optional ?profile_url=<encoded> scopes known/dedup to that profile's
         # own collection; absent → global default ("answers") behavior.
-        profile_url = (parse_qs(parsed.query).get("profile_url") or [None])[0]
+        query = parse_qs(parsed.query)
+        profile_url = (query.get("profile_url") or [None])[0]
+        # ?count_only=1 (alias ?counts=1) → cheap {"count": N} via
+        # count_documents on the scoped collection; skips the URL/hash arrays.
+        if _query_flag(query, "count_only", "counts"):
+            self._json_response(200, self.state.saved_count(profile_url=profile_url))
+            return
         self._json_response(200, self.state.known_snapshot(profile_url=profile_url))
 
     def do_POST(self) -> None:

@@ -643,7 +643,10 @@
 
   function profileSavedDisplay() {
     if (!serveAvailable) return null;
-    if (session.active && session.skippedCount != null) return session.skippedCount;
+    // "saved" = documents permanently persisted in MongoDB for THIS profile.
+    // It is polled live (incl. during a scrape) so it ticks up as the
+    // subscriber drains Kafka→Mongo. The per-session skipped/dedup number is
+    // shown separately on the dedupe line, not here.
     return profileState.saved;
   }
 
@@ -790,8 +793,12 @@
   async function fetchKnownCount() {
     if (!SERVE_KNOWN) return null;
     try {
-      // Scope the "saved" count to the active profile's own collection.
-      var knownUrl = window.qsbkServeConfig.knownUrl(SERVE_BASE, activeProfileUrl);
+      // Scope the "saved" count to the active profile's own collection, and ask
+      // for the cheap count-only response so we never download the full
+      // URL/hash arrays (a profile can hold ~16k URLs) on every poll.
+      var knownUrl = window.qsbkServeConfig.knownUrl(SERVE_BASE, activeProfileUrl, {
+        countOnly: true,
+      });
       var response = await fetch(knownUrl, { cache: "no-store" });
       if (!response.ok) return null;
       var data = await response.json();
@@ -802,12 +809,10 @@
   }
 
   async function refreshProfileSaved() {
+    // Poll the Mongo-persisted count periodically — INCLUDING during an active
+    // session — so "saved" ticks up live as the subscriber drains Kafka→Mongo.
     if (!serveAvailable) {
       if (!session.active) profileState.saved = null;
-      renderProfilePanel(false);
-      return;
-    }
-    if (session.active && session.skippedCount != null) {
       renderProfilePanel(false);
       return;
     }

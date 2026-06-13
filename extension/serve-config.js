@@ -42,10 +42,19 @@
   // the profile to its own collection (profile_<userid>) and reads known/dedup
   // from there; with no profile_url it keeps the global ("answers") behavior.
   // The raw profile URL is fine — serve canonicalizes before hashing.
-  function knownUrl(base, profileUrl) {
+  // Pass { countOnly: true } to request the cheap {count: N} response (used by
+  // the periodic "saved" poll) instead of the full URL/hash arrays.
+  function knownUrl(base, profileUrl, options) {
     var url = normalizeBase(base) + "/known";
+    var params = [];
     if (profileUrl) {
-      url += "?profile_url=" + encodeURIComponent(profileUrl);
+      params.push("profile_url=" + encodeURIComponent(profileUrl));
+    }
+    if (options && options.countOnly) {
+      params.push("count_only=1");
+    }
+    if (params.length) {
+      url += "?" + params.join("&");
     }
     return url;
   }

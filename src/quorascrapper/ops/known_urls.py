@@ -107,6 +107,60 @@ def mongo_known_urls(
         return set()
 
 
+def _query_known_count(collection: Any) -> int:
+    return int(collection.count_documents({}))
+
+
+def mongo_known_count(
+    settings: Settings,
+    *,
+    collection: Any | None = None,
+    collection_name: str | None = None,
+) -> int:
+    """Cheap document count for the (optionally per-profile) collection.
+
+    Uses ``count_documents`` so we never serialize the full URL/hash arrays —
+    intended for the popup's periodic "saved" poll where a profile can hold
+    tens of thousands of URLs.
+    """
+    if collection is not None:
+        try:
+            return _query_known_count(collection)
+        except Exception as exc:
+            logger.warning("Mongo known-count load skipped: %s", exc)
+            return 0
+    if not settings.mongodb_uri:
+        return 0
+    try:
+        client, coll = _connect(settings, collection_name)
+        try:
+            return _query_known_count(coll)
+        finally:
+            client.close()
+    except Exception as exc:
+        logger.warning("Mongo known-count load skipped: %s", exc)
+        return 0
+
+
+def known_count_payload(
+    settings: Settings | None = None,
+    *,
+    collection: Any | None = None,
+    collection_name: str | None = None,
+) -> dict[str, Any]:
+    """JSON body for ``GET /known?count_only=1`` — just ``{"count": <int>}``.
+
+    Mirrors ``known_payload`` scoping (pooled ``collection`` or a
+    ``collection_name`` reconnect) but skips loading/serializing URL+key arrays.
+    """
+    settings = settings or Settings.from_env()
+    return {
+        "count": mongo_known_count(
+            settings, collection=collection, collection_name=collection_name
+        )
+    }
+
+
 def _query_last_ingested(collection: Any) -> dict[str, Any] | None:
     doc = collection.find_one(
         {},
