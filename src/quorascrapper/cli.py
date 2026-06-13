@@ -5,7 +5,16 @@ from __future__ import annotations
 import sys
 
 _SUBCOMMANDS = frozenset(
-    {"install", "filter", "ingest", "config", "serve", "subscriber", "verify-urls"}
+    {
+        "install",
+        "filter",
+        "ingest",
+        "config",
+        "serve",
+        "subscriber",
+        "verify-urls",
+        "monitor",
+    }
 )
 
 
@@ -42,6 +51,10 @@ def main(argv: list[str] | None = None) -> int:
             from quorascrapper.ops.verify_urls import main as verify_main
 
             return verify_main(rest)
+        if cmd == "monitor":
+            from quorascrapper.ops.monitor import main as monitor_main
+
+            return monitor_main(rest)
 
     from quorascrapper.scraper.cli import main as scrape_main
 

@@ -19,6 +19,7 @@ quora-subscriber = "quorascrapper.subscriber.cli:main"
 quora-preflight = "quorascrapper.ops.preflight:main"
 quora-mongo-check = "quorascrapper.ops.mongo_check:main"
 quora-healthcheck = "quorascrapper.ops.healthcheck:main"
+quora-monitor = "quorascrapper.ops.monitor:main"
 quora-filter = "quorascrapper.filter.cli:main"
 quora-serve = "quorascrapper.ops.serve:main"
 

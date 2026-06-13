@@ -62,68 +62,110 @@
         line-height: 1.4;
         user-select: text;
       }
-      #session-panel {
+      /* Unified stats block — one place for Saved / New / Total + timing. */
+      #stats-block {
         display: none;
-        margin-top: 10px;
+        margin-bottom: 12px;
         padding: 10px;
-        border: 1px solid #d1d5db;
-        border-radius: 8px;
+        border: 1px solid #e5e7eb;
+        border-radius: 10px;
         background: #f9fafb;
       }
-      #session-panel.active {
+      #stats-block.visible {
         display: block;
       }
-      #session-elapsed {
+      #stats-grid {
+        display: flex;
+        gap: 8px;
+      }
+      .stat {
+        flex: 1;
+        text-align: center;
+        padding: 8px 4px;
+        border-radius: 8px;
+        background: #fff;
+        border: 1px solid #eef0f2;
+      }
+      .stat-num {
         font-family: ui-monospace, monospace;
-        font-size: 28px;
-        font-weight: 600;
-        letter-spacing: 0.04em;
-        color: #111827;
+        font-size: 20px;
+        font-weight: 700;
         line-height: 1.1;
       }
-      #session-detail {
-        margin-top: 6px;
-        font-size: 12px;
-        color: #374151;
-        line-height: 1.45;
+      .stat-label {
+        margin-top: 3px;
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #9ca3af;
       }
-      #session-timing {
-        margin-top: 6px;
-        font-size: 11px;
+      /* Color accents: green = safely saved, blue = new this session, muted = total. */
+      .stat-saved-num {
+        color: #059669;
+      }
+      .stat-new-num {
+        color: #2563eb;
+      }
+      .stat-total-num {
         color: #6b7280;
-        line-height: 1.5;
-      }
-      #profile-panel {
-        display: none;
-        margin-bottom: 10px;
-        padding: 8px 10px;
-        border-radius: 8px;
-        background: #eff6ff;
-        border: 1px solid #bfdbfe;
-        font-size: 12px;
-        color: #1e3a8a;
-        line-height: 1.4;
-      }
-      #profile-panel.visible {
-        display: block;
-      }
-      #profile-total {
-        font-weight: 600;
-      }
-      .profile-total-num {
         cursor: pointer;
+      }
+      .stat-total-num:hover {
+        color: #1d4ed8;
         text-decoration: underline;
         text-decoration-style: dotted;
         text-underline-offset: 2px;
       }
-      .profile-total-num:hover {
-        color: #1d4ed8;
+      #session-detail {
+        display: none;
       }
-      #session-dedupe {
-        margin-top: 6px;
+      #stats-block.session-active #session-detail {
+        display: block;
+      }
+      #session-meta {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        margin-top: 10px;
+      }
+      #session-elapsed {
+        font-family: ui-monospace, monospace;
+        font-size: 18px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        color: #111827;
+        line-height: 1.1;
+      }
+      #session-rate {
         font-size: 12px;
-        color: #1d4ed8;
-        line-height: 1.4;
+        color: #2563eb;
+      }
+      #session-eta {
+        font-size: 12px;
+        color: #6b7280;
+        margin-left: auto;
+      }
+      #session-extra {
+        margin-top: 6px;
+        font-size: 11px;
+        color: #6b7280;
+        line-height: 1.45;
+      }
+      #session-started {
+        margin-top: 4px;
+        font-size: 11px;
+        color: #9ca3af;
+      }
+      #run-minimized {
+        margin-top: 6px;
+        background: #fff;
+        border: 1px solid #cbd5e1;
+        border-radius: 4px;
+        color: #334155;
+        font-size: 12px;
+      }
+      #run-minimized:hover:not(:disabled) {
+        background: #f1f5f9;
       }
       #serve-status {
         font-size: 11px;
@@ -161,8 +203,36 @@
       <span>drag to move</span>
     </div>
     <div id="panel-body">
-      <div id="profile-panel">
-        <span id="profile-total">Loading profile…</span>
+      <div id="stats-block">
+        <div id="stats-grid">
+          <div class="stat">
+            <div class="stat-num stat-saved-num" id="stat-saved">—</div>
+            <div class="stat-label">Saved</div>
+          </div>
+          <div class="stat">
+            <div class="stat-num stat-new-num" id="stat-new">—</div>
+            <div class="stat-label">New</div>
+          </div>
+          <div class="stat">
+            <div
+              class="stat-num stat-total-num"
+              id="stat-total"
+              title="Click to set max answers"
+            >
+              —
+            </div>
+            <div class="stat-label">Total</div>
+          </div>
+        </div>
+        <div id="session-detail">
+          <div id="session-meta">
+            <span id="session-elapsed">0:00</span>
+            <span id="session-rate"></span>
+            <span id="session-eta"></span>
+          </div>
+          <div id="session-extra"></div>
+          <div id="session-started"></div>
+        </div>
       </div>
       <label>
         Max new answers (this session)
@@ -189,15 +259,9 @@
         Force re-collect (ignore known; re-publish to upgrade content)
       </label>
       <button id="start" type="button">Scrape this tab</button>
-      <div id="session-panel">
-        <div id="session-elapsed">0:00</div>
-        <div id="session-detail">0 new / 100 · 0.0/min</div>
-        <div id="session-dedupe"></div>
-        <div id="session-timing">
-          <div id="session-started"></div>
-          <div id="session-eta"></div>
-        </div>
-      </div>
+      <button id="run-minimized" type="button" title="Detach this Quora tab into its own minimized window so scraping keeps running in the background">
+        Run minimized (background window)
+      </button>
       <div id="status">Open a Quora profile <code>/answers</code> page (logged in).</div>
       <p class="hint">
         Drag the panel header on the page to move it. With serve online, skips known answers and resumes from the last saved scroll position.<br />

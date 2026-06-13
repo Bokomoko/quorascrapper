@@ -150,14 +150,16 @@
   var methodEl = document.getElementById("method");
   var forceEl = document.getElementById("force");
   var startBtn = document.getElementById("start");
-  var sessionPanel = document.getElementById("session-panel");
+  var runMinBtn = document.getElementById("run-minimized");
+  var statsBlock = document.getElementById("stats-block");
+  var statSaved = document.getElementById("stat-saved");
+  var statNew = document.getElementById("stat-new");
+  var statTotal = document.getElementById("stat-total");
   var sessionElapsed = document.getElementById("session-elapsed");
-  var sessionDetail = document.getElementById("session-detail");
-  var sessionDedupe = document.getElementById("session-dedupe");
-  var sessionStarted = document.getElementById("session-started");
+  var sessionRate = document.getElementById("session-rate");
   var sessionEta = document.getElementById("session-eta");
-  var profilePanel = document.getElementById("profile-panel");
-  var profileTotalEl = document.getElementById("profile-total");
+  var sessionExtra = document.getElementById("session-extra");
+  var sessionStarted = document.getElementById("session-started");
   var dragHandle = document.getElementById("drag-handle");
   var serveStatusEl = document.getElementById("serve-status");
 
@@ -258,16 +260,59 @@
     }
   }
 
-  function dedupeSummary() {
-    if (session.newCount == null && session.skippedCount == null) return "";
-    return session.newCount + " new · " + session.skippedCount + " skipped (MongoDB)";
+  // "New (this session)" figure for the stats grid. Prefer the dedup/publish
+  // count when known, otherwise the raw collected count. Dash before a run.
+  function sessionNewDisplay() {
+    if (session.startedAt == null) return "—";
+    var n = session.newCount != null ? session.newCount : session.found || 0;
+    return formatCount(n);
   }
 
+  // Repaint the three stat numbers (Saved / New / Total). `loading` shows a
+  // spinner-ish "…" for the profile total while it is still being fetched.
+  function renderStats(loading) {
+    if (statSaved) {
+      if (!serveAvailable) {
+        statSaved.textContent = "—";
+      } else {
+        statSaved.textContent =
+          profileState.saved != null ? formatCount(profileState.saved) : "…";
+      }
+    }
+    if (statNew) statNew.textContent = sessionNewDisplay();
+    if (statTotal) {
+      if (profileState.total != null) {
+        statTotal.textContent = formatCount(profileState.total);
+      } else {
+        statTotal.textContent = loading ? "…" : "—";
+      }
+    }
+  }
+
+  // Secondary session line: target progress + skipped/recover/resume notes.
+  function renderSessionExtra() {
+    if (!sessionExtra) return;
+    var bits = [];
+    if (session.startedAt != null) {
+      bits.push(session.found + " of " + session.max + " target");
+    }
+    if (session.skippedCount != null && session.skippedCount > 0) {
+      bits.push(formatCount(session.skippedCount) + " already saved");
+    }
+    if (session.scrolled > 0) {
+      bits.push(formatCount(session.scrolled) + " scrolled past");
+    }
+    if (session.resumePending) bits.push("seeking resume…");
+    if (session.recovering) bits.push("recovering…");
+    sessionExtra.textContent = bits.join(" · ");
+    sessionExtra.style.display = bits.length ? "block" : "none";
+  }
+
+  // Kept name for existing call sites; now refreshes the unified stats grid
+  // and the secondary session line instead of a standalone dedupe row.
   function renderDedupeLine() {
-    if (!sessionDedupe) return;
-    var text = dedupeSummary();
-    sessionDedupe.textContent = text;
-    sessionDedupe.style.display = text ? "block" : "none";
+    renderStats();
+    renderSessionExtra();
   }
 
   function setStatus(text) {
@@ -313,10 +358,10 @@
       clearInterval(session.intervalId);
       session.intervalId = null;
     }
-    sessionPanel.classList.remove("active");
-    sessionElapsed.textContent = "0:00";
-    sessionDetail.textContent = "0 new / " + session.max + " · 0.0/min";
-    sessionStarted.textContent = "";
+    if (statsBlock) statsBlock.classList.remove("session-active");
+    if (sessionElapsed) sessionElapsed.textContent = "0:00";
+    if (sessionRate) sessionRate.textContent = "";
+    if (sessionStarted) sessionStarted.textContent = "";
     if (sessionEta) sessionEta.textContent = "";
     renderDedupeLine();
   }
@@ -368,25 +413,17 @@
     if (!session.active || !session.startedAt) return;
     var elapsed = Date.now() - session.startedAt;
     var rateElapsed = sessionRateElapsedMs();
-    sessionElapsed.textContent = formatDuration(elapsed);
+    if (sessionElapsed) sessionElapsed.textContent = formatDuration(elapsed);
     var rateLabel = session.scrolled > 0 ? sessionThroughputRate() : sessionNewRate();
-    var detail =
-      session.found +
-      " new / " +
-      session.max +
-      " · " +
-      rateLabel +
-      "/min";
-    if (session.scrolled > 0) detail += " · " + formatCount(session.scrolled) + " skipped";
-    if (session.resumePending) detail += " · seeking resume…";
-    if (session.recovering) detail += " · recovering…";
-    sessionDetail.textContent = detail;
+    if (sessionRate) sessionRate.textContent = rateLabel + "/min";
     if (sessionEta) {
       sessionEta.textContent =
         session.found >= session.max
           ? "ETA now"
           : "ETA " + formatEta(session.found, session.max, rateElapsed);
     }
+    renderStats();
+    renderSessionExtra();
   }
 
   function beginSession(maxResults) {
@@ -411,8 +448,13 @@
 
     console.info("[qsbk] session started at", new Date(session.startedAt).toISOString());
 
-    sessionPanel.classList.add("active");
-    sessionStarted.textContent = "Started " + formatLocalTime(session.startedAt);
+    if (statsBlock) {
+      statsBlock.classList.add("visible");
+      statsBlock.classList.add("session-active");
+    }
+    if (sessionStarted) {
+      sessionStarted.textContent = "Started " + formatLocalTime(session.startedAt);
+    }
     if (sessionEta) sessionEta.textContent = "ETA calculating…";
     renderDedupeLine();
     renderSession();
@@ -643,45 +685,19 @@
 
   function profileSavedDisplay() {
     if (!serveAvailable) return null;
-    // "saved" = documents permanently persisted in MongoDB for THIS profile.
-    // It is polled live (incl. during a scrape) so it ticks up as the
-    // subscriber drains Kafka→Mongo. The per-session skipped/dedup number is
-    // shown separately on the dedupe line, not here.
+    // "saved" = answers permanently persisted for THIS profile. It is polled
+    // live (incl. during a scrape) so it ticks up as the backend drains the
+    // queue. Shown as the green "Saved" stat.
     return profileState.saved;
   }
 
   function renderProfilePanel(loading) {
-    profilePanel.classList.add("visible");
-    if (loading && profileState.total == null) {
-      profileTotalEl.textContent = "Profile answer count…";
-      return;
-    }
-    var chunks = [];
-    if (profileState.total != null) {
-      chunks.push(
-        '<span class="profile-total-num" title="Click to set max answers">' +
-          formatCount(profileState.total) +
-          "</span> on Quora"
-      );
-    } else if (!loading) {
-      chunks.push("Profile count unavailable");
-    }
-    var saved = profileSavedDisplay();
-    if (serveAvailable) {
-      var savedText = saved != null ? formatCount(saved) + " saved" : "… saved";
-      chunks.push(
-        '<span class="profile-saved" title="Already in MongoDB">' + savedText + "</span>"
-      );
-    }
-    if (!chunks.length) {
-      profileTotalEl.textContent = loading ? "Profile answer count…" : "—";
-      return;
-    }
-    profileTotalEl.innerHTML = chunks.join(" · ");
+    if (statsBlock) statsBlock.classList.add("visible");
+    renderStats(loading);
   }
 
   function hideProfilePanel() {
-    profilePanel.classList.remove("visible");
+    if (statsBlock) statsBlock.classList.remove("visible");
     profileState.total = null;
     profileState.saved = null;
     activeProfileUrl = null;
@@ -994,11 +1010,11 @@
     return totals;
   }
 
-  profileTotalEl.addEventListener("click", function (ev) {
-    if (ev.target && ev.target.classList.contains("profile-total-num")) {
+  if (statTotal) {
+    statTotal.addEventListener("click", function () {
       applyProfileTotalToMax();
-    }
-  });
+    });
+  }
 
   async function initPanel() {
     resetSessionUI();
@@ -1254,6 +1270,40 @@
       startBtn.disabled = false;
     }
   });
+
+  if (runMinBtn) {
+    runMinBtn.addEventListener("click", async function () {
+      var tab = await resolveTargetTab();
+      if (!tab || !tab.id) {
+        setStatus("No Quora /answers tab to move to a background window.");
+        return;
+      }
+      runMinBtn.disabled = true;
+      try {
+        // chrome.windows from this embedded iframe can be unreliable, so route
+        // the detach through the service worker. It moves the Quora tab into
+        // its own minimized, unfocused window; the in-page panel rides along,
+        // so an in-flight scrape keeps running out of the way.
+        var resp = await chrome.runtime.sendMessage({
+          type: "runMinimized",
+          tabId: tab.id,
+        });
+        if (resp && resp.ok) {
+          setStatus("Moved to a minimized background window — scraping keeps running there.");
+        } else {
+          setStatus("Could not minimize: " + ((resp && resp.error) || "unknown error"));
+        }
+      } catch (err) {
+        if (isContextInvalidated(err)) {
+          handleDeadContext();
+        } else {
+          setStatus("Could not minimize: " + (err.message || err));
+        }
+      } finally {
+        runMinBtn.disabled = false;
+      }
+    });
+  }
 
   initPanel();
 })();
