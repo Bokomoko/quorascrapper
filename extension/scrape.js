@@ -1243,6 +1243,16 @@
       return false;
     }
 
+    // Emergency stop — the collect loops run `while (running && …)`, so clearing
+    // the flag ends the current loop, flushes what was collected, and resolves
+    // the in-flight startScrape() promise. Clean abort with no orphaned work.
+    if (msg.type === "stopScrape") {
+      running = false;
+      window.__qsbkScrapeRunning = false;
+      sendResponse({ ok: true });
+      return false;
+    }
+
     if (msg.type !== "startScrape") return false;
 
     if (running) {

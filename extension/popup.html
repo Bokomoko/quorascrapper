@@ -4,258 +4,712 @@
     <meta charset="utf-8" />
     <title>qsbk</title>
     <style>
-      * {
-        box-sizing: border-box;
+      /* Only the version string uses Orbitron; it is bundled locally because
+         the extension CSP (font-src 'self') blocks remote webfonts. Every
+         numeric readout stays on the system monospace stack. */
+      @font-face {
+        font-family: "Orbitron";
+        font-style: normal;
+        font-weight: 700;
+        font-display: swap;
+        src: url("fonts/orbitron-700.woff2") format("woff2");
       }
+
+      /* Cohesive pipeline color system — one color per stage, reused by the
+         clock accents, gauge needles, tachograph, queue bars and legend so
+         every "captured / sent / saved" marker matches everywhere. */
+      :root {
+        --c-captured: #06b6d4;
+        --c-sent: #f59e0b;
+        --c-saved: #10b981;
+        --c-target: #94a3b8;
+
+        --bg: #060a14;
+        --panel: #0d1424;
+        --panel-2: #111a2e;
+        --line: #1e293b;
+        --ink: #e2e8f0;
+        --muted: #64748b;
+        --muted-2: #94a3b8;
+        --radius: 12px;
+        --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+        --num: "Orbitron", var(--mono);
+        --known: #46566f;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; }
       body {
-        font-family: system-ui, sans-serif;
         margin: 0;
         min-width: 340px;
-        background: #fff;
+        background:
+          radial-gradient(1200px 600px at 50% -10%, #0f1c34 0%, transparent 60%),
+          var(--bg);
+        color: var(--ink);
+        font-family: system-ui, -apple-system, sans-serif;
+        -webkit-font-smoothing: antialiased;
         user-select: none;
       }
+
+      .panel {
+        width: 100%;
+        background: linear-gradient(180deg, #0c1322, #0a0f1c);
+        border: 1px solid var(--line);
+        overflow: hidden;
+      }
+
+      /* Legacy in-page drag handle (hidden in the embedded iframe; the floating
+         shell supplies its own drag header). Kept so panel-shell stays intact. */
       #drag-handle {
         cursor: move;
-        padding: 10px 12px;
-        background: linear-gradient(#f3f4f6, #e5e7eb);
-        border-bottom: 1px solid #d1d5db;
+        padding: 8px 12px;
+        background: linear-gradient(180deg, #121b30, #0d1424);
+        border-bottom: 1px solid var(--line);
         font-size: 13px;
         font-weight: 600;
-        color: #111827;
         display: flex;
         align-items: center;
         justify-content: space-between;
       }
-      #drag-handle.hidden {
-        display: none;
+      #drag-handle.hidden { display: none; }
+
+      .titlebar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 14px;
+        background: linear-gradient(180deg, #121b30, #0d1424);
+        border-bottom: 1px solid var(--line);
       }
-      #panel-body {
-        padding: 12px;
+      .titlebar .brand {
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        font-size: 14px;
       }
-      label {
-        display: block;
-        margin-bottom: 10px;
-        font-size: 13px;
+      .titlebar .brand small {
+        font-family: var(--num);
+        font-weight: 700;
+        color: var(--c-captured);
+        font-size: 11px;
+        margin-left: 6px;
+        letter-spacing: 0.04em;
       }
-      input[type="number"],
-      select {
-        width: 100%;
-        margin-top: 4px;
-        padding: 6px 8px;
-        font-size: 13px;
+      /* Minimize-to-window toggle switch (run-minimized), next to the pill. */
+      .switch {
+        margin-left: auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        cursor: pointer;
+        user-select: none;
       }
-      button {
-        width: 100%;
-        margin-top: 4px;
-        padding: 8px;
+      .switch input { display: none; }
+      .switch-track {
+        position: relative;
+        width: 30px; height: 16px;
+        border-radius: 999px;
+        background: #1b2436;
+        border: 1px solid var(--line);
+        transition: background 0.2s;
+      }
+      .switch-thumb {
+        position: absolute;
+        top: 1px; left: 1px;
+        width: 12px; height: 12px;
+        border-radius: 50%;
+        background: var(--muted-2);
+        transition: transform 0.2s, background 0.2s;
+      }
+      .switch input:checked + .switch-track { background: var(--c-captured); }
+      .switch input:checked + .switch-track .switch-thumb { transform: translateX(14px); background: #04221a; }
+      .switch input:disabled + .switch-track { opacity: 0.5; }
+      .switch-text {
+        font-size: 10px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--muted-2);
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--muted-2);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 4px 10px;
+        background: #0a1120;
+      }
+      .pill .dot {
+        width: 8px; height: 8px; border-radius: 50%;
+        background: var(--muted);
+        transition: background 0.3s, box-shadow 0.3s;
+      }
+      .pill.is-running .dot,
+      .pill.is-idle .dot {
+        background: var(--c-saved);
+        box-shadow: 0 0 8px var(--c-saved);
+      }
+      /* "Page Check!" / "Login Wall!" alert state. */
+      .pill.is-alert {
+        color: #fca5a5;
+        border-color: #7f1d1d;
+        background: #210b0b;
+        cursor: help;
+      }
+      .pill.is-alert .dot {
+        background: #ef4444;
+        box-shadow: 0 0 8px #ef4444;
+        animation: blink 1s ease-in-out infinite;
+      }
+      @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+      .body { padding: 14px; }
+
+      /* ── Dashboard: clock + queue bars (left) and speed (right) ──────── */
+      .dash {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-bottom: 12px;
+        align-items: stretch;
+      }
+      .dash-left {
+        flex: 1 1 220px;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .clock {
+        flex: 0 0 auto;
+        min-width: 0;
+        background: linear-gradient(180deg, #0a1322, #070d18);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 8px 12px;
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 3px 8px;
+        align-items: baseline;
+        align-content: center;
+        box-shadow: inset 0 0 24px rgba(6, 182, 212, 0.04);
+      }
+      .clock-row-label {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--muted-2);
+      }
+      .clock-row-label,
+      .clock-row-value {
+        transition: color 0.3s, text-shadow 0.3s, opacity 0.3s;
+      }
+      .clock-row-value {
+        font-family: var(--mono);
+        font-size: 15px;
+        font-weight: 700;
+        text-align: right;
+        letter-spacing: 0.04em;
+        color: var(--ink);
+        font-variant-numeric: tabular-nums;
+        text-shadow: 0 0 10px rgba(226, 232, 240, 0.16);
+      }
+      /* "Turned off" — every inactive row is uniformly unlit. */
+      .clock-row-value.off { color: #1d273b !important; text-shadow: none !important; animation: none; background: none !important; }
+      .clock-row-label.off { color: #28344c; }
+      /* Distinct color per clock row when lit (Now is red). */
+      #clk-start:not(.off):not(.tick)    { color: #34d399; text-shadow: 0 0 10px rgba(16,185,129,0.5); }
+      #lbl-start:not(.off):not(.btn)     { color: #34d399; text-shadow: 0 0 8px rgba(16,185,129,0.4); }
+      #clk-elapsed:not(.off)             { color: #22d3ee; text-shadow: 0 0 10px rgba(34,211,238,0.45); }
+      #row-now:not(.off)                 { color: #f87171; text-shadow: 0 0 10px rgba(248,113,113,0.55); }
+      #clk-remaining:not(.off)           { color: #fbbf24; text-shadow: 0 0 10px rgba(251,191,36,0.45); }
+      #clk-eta:not(.off)                 { color: #a78bfa; text-shadow: 0 0 10px rgba(167,139,250,0.45); }
+
+      /* Idle "Start": the LEGEND itself is the button; the value keeps a green
+         dimmed ticking clock until a run starts. */
+      .clock-row-label.btn {
+        justify-self: start;
+        display: inline-block;
+        color: #04221a;
+        background: linear-gradient(180deg, #34d399, #10b981);
+        padding: 2px 12px;
+        border-radius: 7px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        cursor: pointer;
+        box-shadow: 0 0 12px rgba(16,185,129,0.5), inset 0 1px 0 rgba(255,255,255,0.3);
+        animation: startReady 1.4s ease-in-out infinite;
+      }
+      .clock-row-label.btn:hover { background: linear-gradient(180deg, #4ade80, #14c98c); }
+      .clock-row-label.btn:active { transform: translateY(1px); }
+      .clock-row-value.tick {
+        color: #2f8f6e;
+        text-shadow: 0 0 8px rgba(16,185,129,0.3);
+        animation: tickPulse 1.3s ease-in-out infinite;
         cursor: pointer;
       }
-      button:disabled {
-        opacity: 0.55;
-        cursor: not-allowed;
+      @keyframes tickPulse { 0%,100% { opacity: 0.5; } 50% { opacity: 0.9; } }
+      @keyframes startReady {
+        0%,100% { box-shadow: 0 0 10px rgba(16,185,129,0.45), inset 0 1px 0 rgba(255,255,255,0.3); }
+        50% { box-shadow: 0 0 18px rgba(16,185,129,0.85), inset 0 1px 0 rgba(255,255,255,0.3); }
       }
-      #status {
-        margin-top: 10px;
-        font-size: 12px;
-        color: #444;
-        min-height: 2.5em;
-        line-height: 1.4;
-        user-select: text;
-      }
-      /* Unified stats block — one place for Saved / New / Total + timing. */
-      #stats-block {
+
+      /* "Now" row carries the fire-drill emergency-stop button while running. */
+      .now-label { display: inline-flex; align-items: center; gap: 7px; }
+      .estop {
         display: none;
-        margin-bottom: 12px;
-        padding: 10px;
-        border: 1px solid #e5e7eb;
-        border-radius: 10px;
-        background: #f9fafb;
+        width: 17px; height: 17px;
+        flex: none;
+        padding: 0;
+        margin: 0;
+        border-radius: 50%;
+        border: 1.5px solid #fecaca;
+        background: radial-gradient(circle at 50% 34%, #ef4444, #991b1b);
+        color: #fff;
+        font-size: 5px; font-weight: 800; letter-spacing: 0.02em; line-height: 1;
+        font-family: var(--mono);
+        cursor: pointer;
+        box-shadow: 0 0 0 1.5px #7f1d1d, 0 0 9px rgba(239, 68, 68, 0.7);
+        animation: estopPulse 1.1s ease-in-out infinite;
       }
-      #stats-block.visible {
-        display: block;
+      .clock.running .estop { display: inline-flex; align-items: center; justify-content: center; }
+      .estop:hover { background: radial-gradient(circle at 50% 34%, #f87171, #dc2626); }
+      .estop:active { transform: translateY(1px); }
+      @keyframes estopPulse {
+        0%,100% { box-shadow: 0 0 0 2px #7f1d1d, 0 0 9px rgba(239, 68, 68, 0.55); }
+        50% { box-shadow: 0 0 0 2px #7f1d1d, 0 0 18px rgba(239, 68, 68, 0.95); }
       }
-      #stats-grid {
+
+      .speed {
+        flex: 1 1 180px;
+        min-width: 0;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 10px 10px 8px;
         display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .speed svg { display: block; width: 100%; height: auto; }
+      .gauge-wrap { position: relative; }
+      .gauge-rates {
+        display: flex;
+        justify-content: space-around;
+        align-items: flex-end;
         gap: 8px;
+        margin-top: 2px;
       }
-      .stat {
-        flex: 1;
-        text-align: center;
-        padding: 8px 4px;
-        border-radius: 8px;
-        background: #fff;
-        border: 1px solid #eef0f2;
-      }
-      .stat-num {
-        font-family: ui-monospace, monospace;
-        font-size: 20px;
-        font-weight: 700;
-        line-height: 1.1;
-      }
-      .stat-label {
-        margin-top: 3px;
-        font-size: 10px;
+      .grate { display: flex; flex-direction: column; align-items: center; line-height: 1; font-family: var(--mono); }
+      .grate b { font-family: var(--mono); font-size: 16px; font-weight: 800; text-shadow: 0 0 8px currentColor; }
+      .grate small {
+        margin-top: 2px;
+        font-size: 7px;
         text-transform: uppercase;
         letter-spacing: 0.05em;
-        color: #9ca3af;
+        opacity: 0.85;
       }
-      /* Color accents: green = safely saved, blue = new this session, muted = total. */
-      .stat-saved-num {
-        color: #059669;
+      .gauge-unit {
+        text-align: center;
+        font-family: var(--mono);
+        font-size: 8px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin: 1px 0;
       }
-      .stat-new-num {
-        color: #2563eb;
+      /* Subframe grouping the three tachograph panels. */
+      .tach-frame {
+        margin-top: 8px;
+        padding: 6px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: #0a1018;
       }
-      .stat-total-num {
-        color: #6b7280;
+      .tach-head {
+        font-size: 8px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--muted);
+        margin: 0 2px 5px;
       }
-      #session-detail {
-        display: none;
+      .sparks { display: flex; flex-direction: column; gap: 4px; }
+      .spark3-wrap {
+        position: relative;
+        background: #070d18;
+        border: 1px solid var(--line);
+        border-left-width: 3px;
+        border-radius: 5px;
+        padding: 1px 3px;
       }
-      #stats-block.session-active #session-detail {
-        display: block;
+      .spark3 { display: block; width: 100%; height: auto; }
+      .spark3-tag {
+        position: absolute;
+        top: 1px; left: 5px;
+        font-family: var(--mono);
+        font-size: 7px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        opacity: 0.8;
       }
-      #session-meta {
+
+      /* ── Queue fill bars ─────────────────────────────────────────────── */
+      .bars-panel {
+        flex: 1 1 auto;
         display: flex;
+        align-items: stretch;
+        gap: 6px;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+      }
+      .q-axis {
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        align-items: center;
+        font-family: var(--mono);
+        font-size: 9px;
+        font-weight: 700;
+        color: var(--muted-2);
+        padding: 22px 0 16px;
+      }
+      .q-axis .q-axis-zero { color: var(--muted); font-weight: 400; }
+      .queues {
+        flex: 1;
+        display: grid;
+        grid-template-columns: repeat(var(--queue-count, 3), 1fr);
+        gap: 8px;
+      }
+      .queue { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+      .queue-val { font-family: var(--mono); font-size: 16px; font-weight: 700; line-height: 1; }
+      .queue-track {
+        position: relative;
+        width: 100%;
+        max-width: 54px;
+        height: 96px;
+        background: #070d18;
+        border-radius: 7px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+      }
+      .queue-fill {
+        position: absolute;
+        left: 0; right: 0; bottom: 0;
+        height: 0%;
+        transition: height 0.5s cubic-bezier(0.22, 1, 0.36, 1), bottom 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+        box-shadow: 0 0 12px currentColor;
+      }
+      /* Grey, textured "already known / skipped" base. */
+      .queue-known {
+        position: absolute;
+        left: 0; right: 0; bottom: 0;
+        height: 0%;
+        border-radius: 0 0 6px 6px;
+        background: repeating-linear-gradient(45deg, #3a4760 0 2px, #232d40 2px 5px);
+        border-top: 1px solid #4a5a76;
+        transition: height 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+      }
+      .bars-legend {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted-2);
+      }
+      .bars-legend b { font-family: var(--mono); color: var(--known); }
+      .bl-swatch {
+        width: 14px; height: 10px;
+        border-radius: 2px;
+        border: 1px solid #4a5a76;
+        background: repeating-linear-gradient(45deg, #3a4760 0 2px, #232d40 2px 5px);
+      }
+      .queue-label {
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted-2);
+      }
+
+      /* ── Horizontal progress bar ─────────────────────────────────────── */
+      .progress { margin-bottom: 12px; }
+      .progress-head {
+        display: flex;
+        justify-content: space-between;
         align-items: baseline;
-        gap: 10px;
-        margin-top: 10px;
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--muted-2);
+        margin-bottom: 4px;
       }
-      #session-elapsed {
-        font-family: ui-monospace, monospace;
-        font-size: 18px;
+      #prog-pct { color: var(--c-captured); font-weight: 700; font-size: 13px; }
+      .progress-track {
+        height: 10px;
+        background: #070d18;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        overflow: hidden;
+      }
+      .progress-fill {
+        height: 100%;
+        width: 0%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, var(--c-captured), var(--c-saved));
+        box-shadow: 0 0 10px rgba(6, 182, 212, 0.5);
+        transition: width 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+      }
+
+      /* ── Controls ─────────────────────────────────────────────────────── */
+      .controls { display: grid; gap: 10px; margin-bottom: 12px; }
+      .field { display: grid; gap: 4px; font-size: 12px; color: var(--muted-2); }
+      .field label { letter-spacing: 0.03em; }
+      .field input[type="number"],
+      .field select {
+        width: 100%;
+        padding: 8px 10px;
+        font-size: 13px;
+        background: #070d18;
+        color: var(--ink);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        font-family: inherit;
+      }
+      .field-row { display: flex; gap: 10px; }
+      .field-row .field { flex: 1; }
+      select option:disabled { color: #64748b; }
+
+      fieldset.options {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        margin: 0;
+        padding: 8px 12px 10px;
+        background: #0a1120;
+      }
+      fieldset.options legend {
+        font-size: 11px;
         font-weight: 600;
-        letter-spacing: 0.02em;
-        color: #111827;
-        line-height: 1.1;
+        color: var(--muted-2);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        padding: 0 6px;
       }
-      #session-rate {
+      .check-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
         font-size: 12px;
-        color: #2563eb;
+        line-height: 1.4;
+        color: var(--ink);
       }
-      #session-eta {
-        font-size: 12px;
-        color: #6b7280;
+      .check-row input[type="checkbox"] { margin: 2px 0 0; flex: none; }
+
+      /* ── Teletype / console feed (collapsible; hidden by default) ─────── */
+      .tty {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: #070d18;
+        overflow: hidden;
+      }
+      .tty-head {
+        font-size: 10px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--muted);
+        padding: 7px 12px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .tty.collapsed .tty-head { border-bottom: none; }
+      .tty-caret {
+        display: inline-block;
+        font-size: 9px;
+        color: var(--muted-2);
+        transition: transform 0.2s;
+      }
+      .tty.collapsed .tty-caret { transform: rotate(-90deg); }
+      .tty.collapsed #teletype { display: none; }
+      /* Console-head status dot doubles as the qsbk serve indicator. */
+      .tty-head::before {
+        content: "";
+        width: 7px; height: 7px; border-radius: 50%;
+        flex: none;
+        background: var(--muted);
+        transition: background 0.3s, box-shadow 0.3s;
+      }
+      .tty.serve-online .tty-head::before { background: var(--c-saved); box-shadow: 0 0 6px var(--c-saved); }
+      .tty.serve-offline .tty-head::before { background: var(--c-sent); box-shadow: 0 0 6px var(--c-sent); }
+      .tty-head .status {
         margin-left: auto;
+        max-width: 62%;
+        text-align: right;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        color: var(--muted-2);
+        text-transform: none;
+        letter-spacing: 0;
+        user-select: text;
       }
-      #session-extra {
-        margin-top: 6px;
+      #teletype {
+        font-family: var(--mono);
         font-size: 11px;
-        color: #6b7280;
-        line-height: 1.45;
+        line-height: 1.55;
+        color: #cbd5e1;
+        padding: 8px 12px;
+        max-height: 150px;
+        overflow-y: auto;
+        user-select: text;
       }
-      #session-started {
-        margin-top: 4px;
-        font-size: 11px;
-        color: #9ca3af;
-      }
-      #run-minimized {
-        margin-top: 6px;
-        background: #fff;
-        border: 1px solid #cbd5e1;
-        border-radius: 4px;
-        color: #334155;
-        font-size: 12px;
-      }
-      #run-minimized:hover:not(:disabled) {
-        background: #f1f5f9;
-      }
-      #serve-status {
-        font-size: 11px;
-        margin: -4px 0 10px;
-        line-height: 1.35;
-      }
-      #serve-status.serve-online {
-        color: #047857;
-      }
-      #serve-status.serve-offline {
-        color: #b45309;
-      }
-      select option:disabled {
-        color: #9ca3af;
-      }
+      #teletype .tty-line { white-space: pre-wrap; word-break: break-word; }
+      #teletype .tty-time { color: #475569; margin-right: 7px; }
+      #teletype .tty-line.info .tty-msg { color: #cbd5e1; }
+      #teletype .tty-line.ok .tty-msg { color: var(--c-saved); }
+      #teletype .tty-line.warn .tty-msg { color: var(--c-sent); }
+      #teletype .tty-line.err .tty-msg { color: #f87171; }
+      #teletype .tty-line.cap .tty-msg { color: var(--c-captured); }
+
+      /* Hidden mirror of the serve status text (the visible cue is the console
+         dot + pill). Kept so popup.js status wiring has a stable target. */
+      #serve-status { display: none; }
+
       .hint {
-        font-size: 11px;
-        color: #666;
-        margin-top: 10px;
-        line-height: 1.35;
+        margin: 12px 2px 0;
+        font-size: 10px;
+        color: var(--muted);
+        line-height: 1.5;
         user-select: text;
       }
       #ext-version-footer {
         margin-top: 8px;
         font-size: 11px;
-        color: #9ca3af;
+        color: var(--muted);
         text-align: right;
         user-select: text;
       }
     </style>
   </head>
   <body>
-    <div id="drag-handle">
-      qsbk <span id="ext-version"></span>
-      <span>drag to move</span>
-    </div>
-    <div id="panel-body">
-      <div id="stats-block">
-        <div id="stats-grid">
-          <div class="stat">
-            <div class="stat-num stat-saved-num" id="stat-saved">—</div>
-            <div class="stat-label">Saved</div>
-          </div>
-          <div class="stat">
-            <div class="stat-num stat-new-num" id="stat-new">—</div>
-            <div class="stat-label">New</div>
-          </div>
-          <div class="stat" id="stat-total-cell">
-            <div class="stat-num stat-total-num" id="stat-total">—</div>
-            <div class="stat-label">Total</div>
-          </div>
-        </div>
-        <div id="session-detail">
-          <div id="session-meta">
-            <span id="session-elapsed">0:00</span>
-            <span id="session-rate"></span>
-            <span id="session-eta"></span>
-          </div>
-          <div id="session-extra"></div>
-          <div id="session-started"></div>
-        </div>
+    <div class="panel">
+      <!-- Legacy drag handle (hidden in the embedded iframe). -->
+      <div id="drag-handle" class="hidden">
+        qsbk <span>drag to move</span>
       </div>
-      <label>
-        Max new answers (this session)
-        <input id="max" type="number" min="1" value="100" />
-      </label>
-      <label>
-        Method
-        <select id="method">
-          <option value="graphql" selected>API (GraphQL — fast, full content)</option>
-          <option value="scroll">Scroll (DOM — legacy fallback)</option>
-        </select>
-      </label>
-      <label>
-        Output
-        <select id="output">
-          <option value="kafka" selected>Kafka (via qsbk serve)</option>
-          <option value="json">JSON file download</option>
-          <option value="csv">CSV file download</option>
-        </select>
-      </label>
-      <div id="serve-status" class="serve-offline">Checking qsbk serve…</div>
-      <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 10px;">
-        <input id="force" type="checkbox" style="width: auto; margin: 0;" />
-        Force re-collect (ignore known; re-publish to upgrade content)
-      </label>
-      <button id="start" type="button">Scrape this tab</button>
-      <button id="run-minimized" type="button" title="Detach this Quora tab into its own minimized window so scraping keeps running in the background">
-        Run minimized (background window)
-      </button>
-      <div id="status">Open a Quora profile <code>/answers</code> page (logged in).</div>
-      <p class="hint">
-        Drag the panel header on the page to move it. With serve online, skips known answers and resumes from the last saved scroll position.<br />
-        Max is prefilled with the profile's answer total once it loads; change it before scraping if you want fewer.<br />
-        Green ✓ badges poll <code>/known</code> every few seconds after ingest.
-      </p>
-      <div id="ext-version-footer"></div>
+
+      <div class="titlebar">
+        <span class="brand">qsbk <small id="ext-version"></small></span>
+        <label class="switch" id="min-switch" title="Run minimized: detach this Quora tab into its own background window so scraping keeps running if you switch tabs">
+          <input type="checkbox" id="min-toggle" />
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+          <span class="switch-text">min</span>
+        </label>
+        <span class="pill is-alert" id="run-pill"><span class="dot"></span><span id="run-state">Page Check!</span></span>
+      </div>
+
+      <div class="body">
+        <!-- (A) Clock panel + queue bars (left) and (B) speed (right) -->
+        <div class="dash">
+          <div class="dash-left">
+            <div class="clock" id="clock-panel">
+              <span class="clock-row-label off" id="lbl-start">Start</span>
+              <span class="clock-row-value off" id="clk-start">--:--:--</span>
+              <span class="clock-row-label off" id="lbl-elapsed">Elapsed</span>
+              <span class="clock-row-value off" id="clk-elapsed">+00:00:00</span>
+              <span class="clock-row-label off now-label" id="lbl-now">Now<button id="estop" class="estop" type="button" title="Emergency stop — abort the running scrape" aria-label="Emergency stop">STOP</button></span>
+              <span class="clock-row-value off" id="row-now"><span id="clk-now">--:--:--</span></span>
+              <span class="clock-row-label off" id="lbl-remaining">Remaining</span>
+              <span class="clock-row-value off" id="clk-remaining">+--:--:--</span>
+              <span class="clock-row-label off" id="lbl-eta">ETA</span>
+              <span class="clock-row-value off" id="clk-eta">--:--:--</span>
+            </div>
+            <!-- (C) Queue fill bars — built from QUEUES[]; max = profile total. -->
+            <div class="bars-panel">
+              <div class="q-axis"><span id="q-axis-max-l">0</span><span class="q-axis-zero">0</span></div>
+              <div class="queues" id="queues"></div>
+              <div class="q-axis"><span id="q-axis-max-r">0</span><span class="q-axis-zero">0</span></div>
+            </div>
+            <div class="bars-legend">
+              <span class="bl-swatch"></span> known / skipped <b id="known-count">0</b>
+            </div>
+          </div>
+          <div class="speed">
+            <div class="gauge-wrap">
+              <svg id="gauge" viewBox="0 0 120 76" role="img" aria-label="Throughput speedometer"></svg>
+            </div>
+            <!-- Three digital speedos: instantaneous answers/min per stage. -->
+            <div class="gauge-rates">
+              <span class="grate" style="color: var(--c-captured)"><b id="rate-captured">0</b><small>captured</small></span>
+              <span class="grate" style="color: var(--c-sent)"><b id="rate-sent">0</b><small>sent</small></span>
+              <span class="grate" style="color: var(--c-saved)"><b id="rate-saved">0</b><small>saved</small></span>
+            </div>
+            <div class="gauge-unit">answers / min</div>
+            <!-- Tachograph subframe: three stacked single-series panels. -->
+            <div class="tach-frame">
+              <div class="tach-head">tachograph</div>
+              <div class="sparks" id="sparks"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Overall progress toward the new-answers target -->
+        <div class="progress">
+          <div class="progress-head">
+            <span id="prog-tally">0 / 0 new</span>
+            <span id="prog-pct">0%</span>
+          </div>
+          <div class="progress-track"><div class="progress-fill" id="prog-fill"></div></div>
+        </div>
+
+        <!-- (D) Controls -->
+        <div class="controls">
+          <div class="field-row">
+            <div class="field">
+              <label for="max">Max new answers</label>
+              <input id="max" type="number" min="1" value="100" />
+            </div>
+            <div class="field">
+              <label for="output">Output</label>
+              <select id="output">
+                <option value="kafka" selected>Kafka (via qsbk serve)</option>
+                <option value="json">JSON file download</option>
+                <option value="csv">CSV file download</option>
+              </select>
+            </div>
+          </div>
+          <fieldset class="options">
+            <legend>Options</legend>
+            <label class="check-row">
+              <input id="force" type="checkbox" />
+              Force re-collect (ignore known; re-publish to upgrade content)
+            </label>
+          </fieldset>
+          <div id="serve-status" class="serve-offline">Checking qsbk serve…</div>
+        </div>
+
+        <!-- (E) Teletype / console feed (collapsible; hidden by default) -->
+        <div class="tty collapsed" id="tty">
+          <div class="tty-head" id="tty-head">
+            <span class="tty-caret" id="tty-caret">▾</span>
+            console
+            <span class="status" id="status">Checking page…</span>
+          </div>
+          <div id="teletype"></div>
+        </div>
+
+        <p class="hint">
+          Press the glowing green <strong>START</strong> (top of the clock) to begin; the red <strong>STOP</strong> beside <strong>Now</strong> halts a run. With qsbk serve online, known answers are skipped and the scrape resumes from the last saved position. Max prefills with the profile's answer total; lower it before starting for a shorter run. Green ✓ badges poll <code>/known</code> after ingest.
+        </p>
+        <div id="ext-version-footer"></div>
+      </div>
     </div>
     <script src="serve-config.js"></script>
     <script src="popup.js"></script>

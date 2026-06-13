@@ -144,24 +144,494 @@
     });
   }
 
+  // ── Dashboard helpers ──────────────────────────────────────────────────
+  // 24-hour clock per repo datetime conventions (HH:mm:ss, never AM/PM).
+  function formatClockHMS(ms) {
+    var totalSec = Math.max(0, Math.floor(ms / 1000));
+    var h = Math.floor(totalSec / 3600);
+    var m = Math.floor((totalSec % 3600) / 60);
+    var s = totalSec % 60;
+    return pad2(h) + ":" + pad2(m) + ":" + pad2(s);
+  }
+
+  function formatWallClock(date) {
+    return pad2(date.getHours()) + ":" + pad2(date.getMinutes()) + ":" + pad2(date.getSeconds());
+  }
+
+  function niceCeil(v) {
+    if (v <= 10) return 10;
+    var p = Math.pow(10, Math.floor(Math.log10(v)));
+    var f = v / p;
+    var n = f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10;
+    return n * p;
+  }
+
+  // Per-stage answers/minute over the session's collecting window. Same basis
+  // as formatRate/formatEta so the gauge, clock and stats never disagree.
+  function stageRatePerMin(count) {
+    var el = sessionRateElapsedMs();
+    return el && count > 0 ? count / (el / 60000) : 0;
+  }
+
+  // Mongo-persisted answers that landed *during this session* (saved now minus
+  // the baseline captured when the run began).
+  function savedSessionDelta() {
+    if (profileState.saved == null) return 0;
+    return Math.max(0, profileState.saved - savedBaseline);
+  }
+
+  // Light a clock row or leave it uniformly unlit ("off"). Per-row accent
+  // colors (Now is red) come from the #id:not(.off) rules in popup.html.
+  function setRow(labelEl, valueEl, lit) {
+    if (labelEl) labelEl.classList.toggle("off", !lit);
+    if (valueEl) valueEl.classList.toggle("off", !lit);
+  }
+
+  function renderClockPanel() {
+    var now = new Date();
+    var running = !!(session.active && session.startedAt);
+
+    // Reveals the e-stop beside "Now" only while a run is in flight.
+    if (clockPanel) clockPanel.classList.toggle("running", running);
+
+    // NOW — lit (red) only while running.
+    if (running) {
+      if (clkNow) clkNow.textContent = formatWallClock(now);
+      setRow(lblNow, rowNow, true);
+    } else {
+      if (clkNow) clkNow.textContent = "--:--:--";
+      setRow(lblNow, rowNow, false);
+    }
+
+    // START — the legend itself is the button. While running it freezes to
+    // "Started at"; armed (page check passed) it is a green pressable button
+    // over a green ticking clock; otherwise it stays dark/off.
+    if (lblStart) lblStart.classList.remove("btn", "off");
+    if (clkStart) clkStart.classList.remove("tick", "off");
+    if (running) {
+      if (lblStart) lblStart.textContent = "Started at";
+      if (clkStart) clkStart.textContent = formatWallClock(new Date(session.startedAt));
+    } else if (pageOk) {
+      if (lblStart) {
+        lblStart.textContent = "Start";
+        lblStart.classList.add("btn");
+      }
+      if (clkStart) {
+        clkStart.textContent = formatWallClock(now);
+        clkStart.classList.add("tick");
+      }
+    } else {
+      if (lblStart) {
+        lblStart.textContent = "Start";
+        lblStart.classList.add("off");
+      }
+      if (clkStart) {
+        clkStart.textContent = "--:--:--";
+        clkStart.classList.add("off");
+      }
+    }
+
+    // ELAPSED — frozen at scrapeElapsedMs once a run finishes.
+    var elapsedMs = 0;
+    if (session.startedAt) {
+      elapsedMs = session.active
+        ? Date.now() - session.startedAt
+        : session.scrapeElapsedMs != null
+        ? session.scrapeElapsedMs
+        : Date.now() - session.startedAt;
+    }
+    if (clkElapsed) clkElapsed.textContent = "+" + formatClockHMS(elapsedMs);
+    setRow(lblElapsed, clkElapsed, !!session.startedAt);
+
+    // REMAINING / ETA — based on new-this-session vs the target (Max new).
+    var done = sessionNewCount();
+    var rate = stageRatePerMin(done);
+    var remainingCount = Math.max(0, session.max - done);
+    var complete = session.active && done >= session.max && session.max > 0;
+    var haveEta = session.active && rate > 0 && remainingCount > 0;
+    var remMs = haveEta ? (remainingCount / rate) * 60000 : 0;
+
+    if (complete) {
+      if (clkRemaining) clkRemaining.textContent = "+00:00:00";
+      setRow(lblRemaining, clkRemaining, true);
+      if (clkEta) clkEta.textContent = formatWallClock(now);
+      setRow(lblEta, clkEta, true);
+    } else if (haveEta) {
+      if (clkRemaining) clkRemaining.textContent = "+" + formatClockHMS(remMs);
+      setRow(lblRemaining, clkRemaining, true);
+      if (clkEta) clkEta.textContent = formatWallClock(new Date(Date.now() + remMs));
+      setRow(lblEta, clkEta, true);
+    } else {
+      if (clkRemaining) clkRemaining.textContent = "+--:--:--";
+      setRow(lblRemaining, clkRemaining, false);
+      if (clkEta) clkEta.textContent = "--:--:--";
+      setRow(lblEta, clkEta, false);
+    }
+  }
+
+  // Gauge geometry: semicircle centered at (60,64), value 0 on the left.
+  function gaugePoint(frac, r) {
+    frac = Math.max(0, Math.min(1, frac));
+    var a = (180 - frac * 180) * (Math.PI / 180);
+    return { x: 60 + r * Math.cos(a), y: 64 - r * Math.sin(a) };
+  }
+
+  function arcPoints(r, steps) {
+    var pts = [];
+    for (var i = 0; i <= steps; i++) {
+      var p = gaugePoint(i / steps, r);
+      pts.push(p.x.toFixed(1) + "," + p.y.toFixed(1));
+    }
+    return pts.join(" ");
+  }
+
+  function gaugeNeedle(frac, color, width) {
+    var p = gaugePoint(frac, 40);
+    return (
+      '<line x1="60" y1="64" x2="' +
+      p.x.toFixed(1) +
+      '" y2="' +
+      p.y.toFixed(1) +
+      '" stroke="' +
+      color +
+      '" stroke-width="' +
+      (width || 2.4) +
+      '" stroke-linecap="round" />'
+    );
+  }
+
+  // Speedometer + three digital speedos. Uses the smoothed instantaneous
+  // per-stage rate (lastSample) so the dial behaves like a real speedometer.
+  function renderSpeed() {
+    var capRate = session.active ? lastSample.cap : 0;
+    var sentRate = session.active ? lastSample.sent : 0;
+    var savedRate = session.active ? lastSample.saved : 0;
+
+    // Auto-range the dial up and down to the recent peak across all stages.
+    var recentPeak = 1;
+    for (var s = 0; s < speedHistory.length; s++) {
+      var h = speedHistory[s];
+      recentPeak = Math.max(recentPeak, h.cap, h.sent, h.saved);
+    }
+    recentPeak = Math.max(recentPeak, capRate, sentRate, savedRate);
+    gaugeMax = Math.max(20, niceCeil(recentPeak * 1.2));
+
+    if (gaugeEl) {
+      var parts = [];
+      parts.push(
+        '<polyline fill="none" stroke="#16223a" stroke-width="8" stroke-linecap="round" points="' +
+          arcPoints(48, 48) +
+          '" />'
+      );
+      var prog = Math.max(0, Math.min(1, capRate / gaugeMax));
+      if (prog > 0.001) {
+        parts.push(
+          '<polyline fill="none" stroke="' + STAGE_COLOR.captured +
+            '" stroke-width="8" stroke-linecap="round" opacity="0.9" points="' +
+            arcPoints(48, Math.max(1, Math.round(48 * prog))) + '" />'
+        );
+      }
+      [0, 0.25, 0.5, 0.75, 1].forEach(function (f) {
+        var o = gaugePoint(f, 46);
+        var i2 = gaugePoint(f, 38);
+        parts.push(
+          '<line x1="' + o.x.toFixed(1) + '" y1="' + o.y.toFixed(1) + '" x2="' +
+            i2.x.toFixed(1) + '" y2="' + i2.y.toFixed(1) +
+            '" stroke="#3b4a63" stroke-width="1.4" />'
+        );
+      });
+      // Draw saved → sent → captured so the captured needle sits on top.
+      parts.push(gaugeNeedle(savedRate / gaugeMax, STAGE_COLOR.saved, 2));
+      parts.push(gaugeNeedle(sentRate / gaugeMax, STAGE_COLOR.sent, 2));
+      parts.push(gaugeNeedle(capRate / gaugeMax, STAGE_COLOR.captured, 2.8));
+      parts.push('<circle cx="60" cy="64" r="4" fill="#0a1120" stroke="#3b4a63" stroke-width="1.2" />');
+      parts.push('<text x="12" y="74" fill="#475569" font-size="6" font-family="monospace">0</text>');
+      parts.push(
+        '<text x="103" y="74" fill="#475569" font-size="6" font-family="monospace">' + gaugeMax + "</text>"
+      );
+      gaugeEl.innerHTML = parts.join("");
+    }
+    if (rateCaptured) rateCaptured.textContent = Math.round(capRate);
+    if (rateSent) rateSent.textContent = Math.round(sentRate);
+    if (rateSaved) rateSaved.textContent = Math.round(savedRate);
+  }
+
+  // One ~1Hz sample of per-stage instantaneous answers/min, lightly smoothed.
+  // Frozen (no new samples) when idle so the last run's tachograph trace stays
+  // on screen instead of scrolling away.
+  function sampleSpeed() {
+    var now = Date.now();
+    var dt = lastSampleAt ? (now - lastSampleAt) / 1000 : 0;
+    lastSampleAt = now;
+    var cap = session.found || 0;
+    var sent = sessionNewCount() || 0;
+    var saved = savedSessionDelta() || 0;
+    var inst = { cap: 0, sent: 0, saved: 0 };
+    if (session.active && dt > 0) {
+      inst.cap = (Math.max(0, cap - lastSampleCounts.cap) / dt) * 60;
+      inst.sent = (Math.max(0, sent - lastSampleCounts.sent) / dt) * 60;
+      inst.saved = (Math.max(0, saved - lastSampleCounts.saved) / dt) * 60;
+    }
+    lastSampleCounts = { cap: cap, sent: sent, saved: saved };
+    if (session.active) {
+      lastSample = {
+        cap: lastSample.cap * 0.4 + inst.cap * 0.6,
+        sent: lastSample.sent * 0.4 + inst.sent * 0.6,
+        saved: lastSample.saved * 0.4 + inst.saved * 0.6,
+      };
+      speedHistory.push({ cap: lastSample.cap, sent: lastSample.sent, saved: lastSample.saved });
+      if (speedHistory.length > SPARK_MAX) speedHistory.shift();
+    } else {
+      lastSample = { cap: 0, sent: 0, saved: 0 };
+    }
+  }
+
+  // Build the three stacked single-series tachograph panels once.
+  function buildSparks() {
+    if (!sparksEl) return;
+    sparksEl.innerHTML = "";
+    sparkEls = {};
+    QUEUES.forEach(function (q) {
+      var wrap = document.createElement("div");
+      wrap.className = "spark3-wrap";
+      wrap.style.borderLeftColor = q.color;
+      wrap.innerHTML =
+        '<span class="spark3-tag" style="color:' + q.color + '">' + q.label + "</span>" +
+        '<svg class="spark3" viewBox="0 0 120 22" preserveAspectRatio="none" aria-label="' +
+        q.label + ' throughput"></svg>';
+      sparksEl.appendChild(wrap);
+      sparkEls[q.key] = wrap.querySelector("svg");
+    });
+  }
+
+  var SPARK_KEY = { captured: "cap", sent: "sent", saved: "saved" };
+  function renderSpark() {
+    var H = 22;
+    var pad = 2;
+    var W = 120;
+    // Shared vertical scale across the three panels for fair comparison.
+    var maxv = 1;
+    for (var i = 0; i < speedHistory.length; i++) {
+      var h = speedHistory[i];
+      maxv = Math.max(maxv, h.cap, h.sent, h.saved);
+    }
+    var bw = W / SPARK_MAX;
+    QUEUES.forEach(function (q) {
+      var svg = sparkEls[q.key];
+      if (!svg) return;
+      if (!speedHistory.length) {
+        svg.innerHTML = "";
+        return;
+      }
+      var field = SPARK_KEY[q.key];
+      var pts = [];
+      for (var j = 0; j < speedHistory.length; j++) {
+        var v = speedHistory[j][field];
+        var x = j * bw;
+        var y = H - pad - (v / maxv) * (H - pad * 2);
+        pts.push(x.toFixed(2) + "," + y.toFixed(2));
+      }
+      svg.innerHTML =
+        '<polyline fill="none" stroke="' + q.color +
+        '" stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round" points="' +
+        pts.join(" ") + '" />';
+    });
+  }
+
+  // Build the queue fill bars once from QUEUES[] (grey known base + colored
+  // new-this-session fill stacked on top).
+  function buildQueues() {
+    if (!queuesEl) return;
+    queuesEl.style.setProperty("--queue-count", QUEUES.length);
+    queuesEl.innerHTML = "";
+    queueEls = {};
+    QUEUES.forEach(function (q) {
+      var wrap = document.createElement("div");
+      wrap.className = "queue";
+      wrap.innerHTML =
+        '<span class="queue-val" style="color:' + q.color + '">0</span>' +
+        '<div class="queue-track">' +
+        '<div class="queue-known"></div>' +
+        '<div class="queue-fill" style="background:' + q.color + ";color:" + q.color + '"></div>' +
+        "</div>" +
+        '<span class="queue-label">' + q.label + "</span>";
+      queuesEl.appendChild(wrap);
+      queueEls[q.key] = {
+        val: wrap.querySelector(".queue-val"),
+        fill: wrap.querySelector(".queue-fill"),
+        known: wrap.querySelector(".queue-known"),
+      };
+    });
+  }
+
+  // Grey "already known / skipped" base for this profile: answers persisted
+  // before this run (the saved baseline) plus any saved ones scrolled past.
+  function knownBaseCount() {
+    var base = session.startedAt != null ? savedBaseline : profileState.saved || 0;
+    return Math.max(0, base) + (session.scrolled || 0);
+  }
+
+  function renderQueueBars() {
+    var counts = {
+      captured: session.found || 0,
+      sent: sessionNewCount() || 0,
+      saved: savedSessionDelta() || 0,
+    };
+    // Full-scale for every bar AND both axes = the profile's total answers
+    // (a running max keeps bars sane before the total is known).
+    var total =
+      profileState.total != null && profileState.total > 0
+        ? profileState.total
+        : Math.max(1, counts.captured, session.max || 1);
+    var known = knownBaseCount();
+    var knownPct = Math.max(0, Math.min(100, (known / total) * 100));
+    QUEUES.forEach(function (q) {
+      var els = queueEls[q.key];
+      if (!els) return;
+      var n = Math.floor(counts[q.key]);
+      if (els.val) els.val.textContent = formatCount(n);
+      var pct = Math.max(0, Math.min(100 - knownPct, (n / total) * 100));
+      if (els.known) els.known.style.height = knownPct + "%";
+      if (els.fill) {
+        els.fill.style.bottom = knownPct + "%";
+        els.fill.style.height = pct + "%";
+      }
+    });
+    var maxLabel = formatCount(total);
+    if (axisMaxL) axisMaxL.textContent = maxLabel;
+    if (axisMaxR) axisMaxR.textContent = maxLabel;
+    if (knownCountEl) knownCountEl.textContent = formatCount(Math.round(known));
+  }
+
+  // Horizontal progress toward the new-answers target (tally + percent).
+  function renderProgress() {
+    var target = Math.max(1, session.max || 1);
+    var done = Math.min(target, Math.floor(sessionNewCount()));
+    var pct = session.startedAt != null ? Math.max(0, Math.min(100, (done / target) * 100)) : 0;
+    if (progFill) progFill.style.width = pct + "%";
+    if (progPct) progPct.textContent = Math.round(pct) + "%";
+    if (progTally) progTally.textContent = formatCount(done) + " / " + formatCount(target) + " new";
+  }
+
+  function renderDashboard() {
+    renderClockPanel();
+    renderSpeed();
+    renderSpark();
+    renderQueueBars();
+    renderProgress();
+  }
+
+  function resetDashboardSeries() {
+    speedHistory = [];
+    lastSample = { cap: 0, sent: 0, saved: 0 };
+    lastSampleCounts = { cap: 0, sent: 0, saved: 0 };
+    lastSampleAt = Date.now();
+    gaugeMax = 20;
+    savedBaseline = profileState.saved || 0;
+  }
+
+  var lastTtyMsg = "";
+  function classifyStatus(text) {
+    if (/error|failed|could not|can.t|no .* found|not found/i.test(text)) return "err";
+    if (/offline|stuck|stall|slow|requires|timeout|reload/i.test(text)) return "warn";
+    if (/done|published|online|saved|sent to kafka|ready/i.test(text)) return "ok";
+    return "info";
+  }
+
+  function logTeletype(msg, kind) {
+    if (!teletypeEl || !msg) return;
+    var line = document.createElement("div");
+    line.className = "tty-line " + (kind || "info");
+    var t = document.createElement("span");
+    t.className = "tty-time";
+    t.textContent = formatWallClock(new Date());
+    var m = document.createElement("span");
+    m.className = "tty-msg";
+    m.textContent = msg;
+    line.appendChild(t);
+    line.appendChild(m);
+    teletypeEl.appendChild(line);
+    while (teletypeEl.childNodes.length > 200) {
+      teletypeEl.removeChild(teletypeEl.firstChild);
+    }
+    teletypeEl.scrollTop = teletypeEl.scrollHeight;
+  }
+
   var statusEl = document.getElementById("status");
   var maxEl = document.getElementById("max");
   var outputEl = document.getElementById("output");
-  var methodEl = document.getElementById("method");
   var forceEl = document.getElementById("force");
-  var startBtn = document.getElementById("start");
-  var runMinBtn = document.getElementById("run-minimized");
-  var statsBlock = document.getElementById("stats-block");
-  var statSaved = document.getElementById("stat-saved");
-  var statNew = document.getElementById("stat-new");
-  var statTotal = document.getElementById("stat-total");
-  var sessionElapsed = document.getElementById("session-elapsed");
-  var sessionRate = document.getElementById("session-rate");
-  var sessionEta = document.getElementById("session-eta");
-  var sessionExtra = document.getElementById("session-extra");
-  var sessionStarted = document.getElementById("session-started");
   var dragHandle = document.getElementById("drag-handle");
   var serveStatusEl = document.getElementById("serve-status");
+
+  // Pipeline stages — the single source of truth for the queue bars, the three
+  // tachograph panels, the digital speedos and the legend order. Colors mirror
+  // the CSS custom properties in popup.html.
+  var QUEUES = [
+    { key: "captured", label: "Captured", color: "#06b6d4" },
+    { key: "sent", label: "Sent", color: "#f59e0b" },
+    { key: "saved", label: "Saved", color: "#10b981" },
+  ];
+  var STAGE_COLOR = {};
+  QUEUES.forEach(function (q) {
+    STAGE_COLOR[q.key] = q.color;
+  });
+
+  // Clock panel (labels + values; the START legend doubles as the run button,
+  // the Now row hosts the e-stop).
+  var clockPanel = document.getElementById("clock-panel");
+  var lblStart = document.getElementById("lbl-start");
+  var clkStart = document.getElementById("clk-start");
+  var lblElapsed = document.getElementById("lbl-elapsed");
+  var clkElapsed = document.getElementById("clk-elapsed");
+  var lblNow = document.getElementById("lbl-now");
+  var rowNow = document.getElementById("row-now");
+  var clkNow = document.getElementById("clk-now");
+  var lblRemaining = document.getElementById("lbl-remaining");
+  var clkRemaining = document.getElementById("clk-remaining");
+  var lblEta = document.getElementById("lbl-eta");
+  var clkEta = document.getElementById("clk-eta");
+  var estopBtn = document.getElementById("estop");
+
+  // Speedometer + digital speedos + tachograph subframe.
+  var gaugeEl = document.getElementById("gauge");
+  var rateCaptured = document.getElementById("rate-captured");
+  var rateSent = document.getElementById("rate-sent");
+  var rateSaved = document.getElementById("rate-saved");
+  var sparksEl = document.getElementById("sparks");
+  var sparkEls = {};
+
+  // Queue fill bars + horizontal progress.
+  var queuesEl = document.getElementById("queues");
+  var queueEls = {};
+  var axisMaxL = document.getElementById("q-axis-max-l");
+  var axisMaxR = document.getElementById("q-axis-max-r");
+  var knownCountEl = document.getElementById("known-count");
+  var progFill = document.getElementById("prog-fill");
+  var progTally = document.getElementById("prog-tally");
+  var progPct = document.getElementById("prog-pct");
+
+  // Titlebar status pill + run-minimized switch + collapsible console.
+  var runPill = document.getElementById("run-pill");
+  var runState = document.getElementById("run-state");
+  var minToggle = document.getElementById("min-toggle");
+  var ttyEl = document.getElementById("tty");
+  var ttyHead = document.getElementById("tty-head");
+  var teletypeEl = document.getElementById("teletype");
+
+  var SPARK_MAX = 40;
+  var speedHistory = []; // [{cap,sent,saved}] instantaneous answers/min, newest last
+  var lastSample = { cap: 0, sent: 0, saved: 0 };
+  var lastSampleCounts = { cap: 0, sent: 0, saved: 0 };
+  var lastSampleAt = 0;
+  var gaugeMax = 20;
+  var savedBaseline = 0;
+  var dashboardTimer = null;
+
+  // Status-pill gate state: pageOk = active tab is a Quora /answers page;
+  // loginWall = Quora served a blocked/logged-out page.
+  var pageOk = false;
+  var loginWall = false;
 
   var targetTabId = null;
   var serveAvailable = false;
@@ -271,53 +741,19 @@
     return session.newCount != null ? session.newCount : session.found || 0;
   }
 
-  // "New (this session)" figure for the stats grid. Dash before a run.
-  function sessionNewDisplay() {
-    if (session.startedAt == null) return "—";
-    return formatCount(sessionNewCount());
+  // The old standalone Saved/New/Total stat grid is gone; those figures now
+  // live in the queue bars (counts), the legend (known) and the progress bar
+  // (new / target). This keeps the legacy name/callsites but drives the new
+  // panels and the one-shot Max prefill once the profile total is known.
+  function renderStats() {
+    if (profileState.total != null) prefillMaxFromTotal();
+    renderQueueBars();
+    renderProgress();
   }
 
-  // Repaint the three stat numbers (Saved / New / Total). `loading` shows a
-  // spinner-ish "…" for the profile total while it is still being fetched.
-  function renderStats(loading) {
-    if (statSaved) {
-      if (!serveAvailable) {
-        statSaved.textContent = "—";
-      } else {
-        statSaved.textContent =
-          profileState.saved != null ? formatCount(profileState.saved) : "…";
-      }
-    }
-    if (statNew) statNew.textContent = sessionNewDisplay();
-    if (statTotal) {
-      if (profileState.total != null) {
-        statTotal.textContent = formatCount(profileState.total);
-        prefillMaxFromTotal();
-      } else {
-        statTotal.textContent = loading ? "…" : "—";
-      }
-    }
-  }
-
-  // Secondary session line: target progress + skipped/recover/resume notes.
+  // Secondary session info now lives in the horizontal progress bar.
   function renderSessionExtra() {
-    if (!sessionExtra) return;
-    var bits = [];
-    if (session.startedAt != null) {
-      bits.push(
-        formatCount(sessionNewCount()) + " of " + formatCount(session.max) + " target"
-      );
-    }
-    if (session.skippedCount != null && session.skippedCount > 0) {
-      bits.push(formatCount(session.skippedCount) + " already saved");
-    }
-    if (session.scrolled > 0) {
-      bits.push(formatCount(session.scrolled) + " scrolled past");
-    }
-    if (session.resumePending) bits.push("seeking resume…");
-    if (session.recovering) bits.push("recovering…");
-    sessionExtra.textContent = bits.join(" · ");
-    sessionExtra.style.display = bits.length ? "block" : "none";
+    renderProgress();
   }
 
   // Kept name for existing call sites; now refreshes the unified stats grid
@@ -329,6 +765,59 @@
 
   function setStatus(text) {
     statusEl.textContent = text;
+    // Mirror into the teletype feed, de-duping consecutive identical lines so
+    // rapid progress repaints don't flood the console.
+    if (text && text !== lastTtyMsg) {
+      lastTtyMsg = text;
+      logTeletype(text, classifyStatus(text));
+    }
+  }
+
+  var PAGE_HINT = "Open a Quora profile /answers page, then the green START arms.";
+
+  // Status pill / alarm. mode: "running" | "idle" | "loginwall" | "alert".
+  function setPill(mode) {
+    if (!runPill || !runState) return;
+    runPill.classList.remove("is-idle", "is-running", "is-alert");
+    if (mode === "running") {
+      runPill.classList.add("is-running");
+      runState.textContent = "running";
+      runPill.title = "Session running — STOP is beside Now.";
+    } else if (mode === "idle") {
+      runPill.classList.add("is-idle");
+      runState.textContent = "ready";
+      runPill.title = "On /answers ✓ — press the green START to begin.";
+    } else if (mode === "loginwall") {
+      runPill.classList.add("is-alert");
+      runState.textContent = "Login Wall!";
+      runPill.title =
+        "Quora blocked access (login wall). Log in on the tab, then press START to retry.";
+    } else {
+      runPill.classList.add("is-alert");
+      runState.textContent = "Page Check!";
+      runPill.title = PAGE_HINT;
+    }
+  }
+
+  // /answers page gate — START only arms once the active tab is a profile
+  // /answers page. Drives the idle/alert pill when no run is in flight. A
+  // standing login-wall alarm survives until the user retries with START.
+  function setPageOk(ok) {
+    pageOk = ok;
+    if (!session.active) setPill(loginWall ? "loginwall" : ok ? "idle" : "alert");
+    renderClockPanel();
+  }
+
+  // Real login-wall detection: Quora served a logged-out/blocked page, so the
+  // content script could not read uid/formkey (stop_reason "context_missing")
+  // or found nothing while logged out. Flag the alarm and halt.
+  function raiseLoginWall(message) {
+    loginWall = true;
+    setPill("loginwall");
+    logTeletype(
+      message || "Login wall — Quora blocked access. Log in on the tab, then START to retry.",
+      "err"
+    );
   }
 
   function stopReasonHint(meta) {
@@ -370,12 +859,8 @@
       clearInterval(session.intervalId);
       session.intervalId = null;
     }
-    if (statsBlock) statsBlock.classList.remove("session-active");
-    if (sessionElapsed) sessionElapsed.textContent = "0:00";
-    if (sessionRate) sessionRate.textContent = "";
-    if (sessionStarted) sessionStarted.textContent = "";
-    if (sessionEta) sessionEta.textContent = "";
     renderDedupeLine();
+    renderDashboard();
   }
 
   function applyClassifyReport(report) {
@@ -423,23 +908,13 @@
 
   function renderSession() {
     if (!session.active || !session.startedAt) return;
-    var elapsed = Date.now() - session.startedAt;
-    var rateElapsed = sessionRateElapsedMs();
-    if (sessionElapsed) sessionElapsed.textContent = formatDuration(elapsed);
-    var rateLabel = session.scrolled > 0 ? sessionThroughputRate() : sessionNewRate();
-    if (sessionRate) sessionRate.textContent = rateLabel + "/min";
-    if (sessionEta) {
-      sessionEta.textContent =
-        session.found >= session.max
-          ? "ETA now"
-          : "ETA " + formatEta(session.found, session.max, rateElapsed);
-    }
     renderStats();
-    renderSessionExtra();
+    renderDashboard();
   }
 
   function beginSession(maxResults) {
     resetSessionUI();
+    resetDashboardSeries();
     session.active = true;
     session.startedAt = Date.now();
     session.collectingSince = null;
@@ -460,14 +935,7 @@
 
     console.info("[qsbk] session started at", new Date(session.startedAt).toISOString());
 
-    if (statsBlock) {
-      statsBlock.classList.add("visible");
-      statsBlock.classList.add("session-active");
-    }
-    if (sessionStarted) {
-      sessionStarted.textContent = "Started " + formatLocalTime(session.startedAt);
-    }
-    if (sessionEta) sessionEta.textContent = "ETA calculating…";
+    setPill("running");
     renderDedupeLine();
     renderSession();
     session.intervalId = setInterval(renderSession, 250);
@@ -479,7 +947,9 @@
       clearInterval(session.intervalId);
       session.intervalId = null;
     }
+    setPill(loginWall ? "loginwall" : pageOk ? "idle" : "alert");
     renderSession();
+    renderDashboard();
   }
 
   function sessionSummary() {
@@ -712,16 +1182,16 @@
   }
 
   function renderProfilePanel(loading) {
-    if (statsBlock) statsBlock.classList.add("visible");
     renderStats(loading);
   }
 
   function hideProfilePanel() {
-    if (statsBlock) statsBlock.classList.remove("visible");
     profileState.total = null;
     profileState.saved = null;
     activeProfileUrl = null;
     maxAutoFilled = false;
+    renderQueueBars();
+    renderProgress();
   }
 
   function readProfileCache(profileUrl) {
@@ -862,13 +1332,11 @@
   // /answers page. Otherwise grey it out and explain why. Never overrides the
   // mid-run disabled state (the click handler owns that while a session runs).
   function updateScrapeGate(tab) {
-    if (!startBtn) return false;
     if (session.active) return false;
     var ok = !!(tab && isAnswersPage(tab.url));
-    startBtn.disabled = !ok;
-    startBtn.title = ok
-      ? "Scrape this Quora /answers page"
-      : "Open a Quora profile /answers page to enable scraping.";
+    // START is the green clock legend; arming/disarming is driven by the page
+    // gate (pageOk), which also sets the Page-Check/idle status pill.
+    setPageOk(ok);
     return ok;
   }
 
@@ -1000,7 +1468,15 @@
     return outputEl.querySelector('option[value="kafka"]');
   }
 
+  var lastServeAvailable = null;
   function updateServeAvailability(available) {
+    if (available !== lastServeAvailable) {
+      lastServeAvailable = available;
+      logTeletype(
+        "qsbk serve: " + (available ? "online" : "offline") + " (" + SERVE_BASE + ")",
+        available ? "ok" : "warn"
+      );
+    }
     serveAvailable = available;
     var opt = kafkaOption();
     if (opt) {
@@ -1019,6 +1495,12 @@
         ? "qsbk serve: online (" + SERVE_BASE + ")"
         : "qsbk serve: offline (" + SERVE_BASE + ")";
       serveStatusEl.className = available ? "serve-online" : "serve-offline";
+    }
+    // The console-head dot doubles as the serve indicator (green online /
+    // amber offline) — see .tty.serve-online/.serve-offline in popup.html.
+    if (ttyEl) {
+      ttyEl.classList.toggle("serve-online", available);
+      ttyEl.classList.toggle("serve-offline", !available);
     }
   }
 
@@ -1151,8 +1633,23 @@
     return totals;
   }
 
+  function startDashboardTick() {
+    lastSampleAt = Date.now();
+    renderDashboard();
+    if (dashboardTimer) clearInterval(dashboardTimer);
+    dashboardTimer = setInterval(function () {
+      sampleSpeed();
+      renderDashboard();
+    }, 1000);
+  }
+
   async function initPanel() {
+    // Build the dynamic panels (queue bars + 3 tachograph SVGs) before the
+    // first render so the dashboard tick has live targets to update.
+    buildQueues();
+    buildSparks();
     resetSessionUI();
+    startDashboardTick();
     var version =
       chrome.runtime && chrome.runtime.getManifest
         ? chrome.runtime.getManifest().version
@@ -1187,7 +1684,9 @@
     await refreshTargetTab({ announce: true });
   }
 
-  startBtn.addEventListener("click", async function () {
+  async function startScrape() {
+    // Gated on the /answers page check and never re-entrant mid-run.
+    if (session.active || !pageOk) return;
     var tab = await resolveTargetTab();
     if (!tab || !tab.id) {
       setStatus("No Quora /answers tab found.");
@@ -1201,7 +1700,8 @@
     var maxResults = parseInt(maxEl.value, 10) || 100;
     var output = outputEl.value;
 
-    startBtn.disabled = true;
+    // Pressing START is a retry: clear any standing login-wall alarm.
+    loginWall = false;
     beginSession(maxResults);
     setStatus("Connecting to tab…");
 
@@ -1209,7 +1709,8 @@
       await ensureScraper(tab.id);
       setStatus("Collecting answers…");
 
-      var method = methodEl && methodEl.value === "scroll" ? "scroll" : "graphql";
+      // GraphQL is the only collection mode in this UI (no method picker).
+      var method = "graphql";
       var force = !!(forceEl && forceEl.checked);
       // Stream publish: in API mode with Kafka output, the content script POSTs
       // /upsert in batches as it collects, instead of buffering everything and
@@ -1242,6 +1743,15 @@
 
       var rows = response.rows || [];
       var meta = response.meta || {};
+
+      // Real login-wall detection: the content script could not read the
+      // page's uid/formkey, which means Quora served a logged-out/blocked
+      // page. Raise the alarm and stop instead of reporting an empty run.
+      if (meta.stop_reason === "context_missing") {
+        raiseLoginWall("Login wall — could not read the page (are you logged in?).");
+        setStatus("Login wall — log in on the Quora tab, then press START to retry.");
+        return;
+      }
 
       // Streamed publish: the content script already pushed everything to Kafka
       // (rows comes back empty). Report the published totals and finish.
@@ -1398,33 +1908,89 @@
       }
       endSession();
       await refreshProfileSaved();
-      // Re-enable respecting the is-answers-page gate so we never leave a
-      // non-/answers tab with an active Scrape button after a run finishes.
+      // Re-arm respecting the is-answers-page gate so we never leave a
+      // non-/answers tab armed (or a login-wall alarm cleared) after a run.
       updateScrapeGate(await resolveTargetTab());
     }
-  });
+  }
 
-  if (runMinBtn) {
-    runMinBtn.addEventListener("click", async function () {
+  // Emergency stop — abort the in-flight scrape. The content script's collect
+  // loops watch its `running` flag; flipping it false ends the loop and
+  // resolves the in-flight startScrape() promise (whose finally re-arms the
+  // gate). Reflect the halt in the UI immediately.
+  async function stopScrape() {
+    if (!session.active) return;
+    setStatus("Stopping — aborting scrape…");
+    logTeletype("EMERGENCY STOP — aborting the running scrape.", "err");
+    var tabId = targetTabId;
+    try {
+      var tab = await resolveTargetTab();
+      if (tab && tab.id) tabId = tab.id;
+    } catch (e) {
+      /* fall back to the pinned target tab id */
+    }
+    if (tabId != null) {
+      try {
+        await chrome.tabs.sendMessage(tabId, { type: "stopScrape" });
+      } catch (e) {
+        if (isContextInvalidated(e)) handleDeadContext();
+      }
+    }
+    endSession();
+    setStatus("Stopped. Press START to run again.");
+  }
+
+  // The glowing green "START" clock legend (and its ticking value) is itself
+  // the start button; gated on the /answers page check.
+  function tryStartFromClock() {
+    if (!session.active && pageOk) startScrape();
+  }
+  if (lblStart) lblStart.addEventListener("click", tryStartFromClock);
+  if (clkStart) clkStart.addEventListener("click", tryStartFromClock);
+
+  // Fire-drill emergency stop beside "Now".
+  if (estopBtn) {
+    estopBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      stopScrape();
+    });
+  }
+
+  // Collapsible console (hidden by default; click the head to toggle).
+  if (ttyHead && ttyEl) {
+    ttyHead.addEventListener("click", function () {
+      ttyEl.classList.toggle("collapsed");
+    });
+  }
+
+  // Run-minimized switch: detach the Quora tab into its own minimized,
+  // unfocused window so an in-flight scrape keeps running out of the way.
+  // chrome.windows from this embedded iframe can be unreliable, so route the
+  // detach through the service worker (background.js).
+  if (minToggle) {
+    minToggle.addEventListener("change", async function () {
+      if (!minToggle.checked) {
+        logTeletype("run-minimized off", "info");
+        return;
+      }
       var tab = await resolveTargetTab();
       if (!tab || !tab.id) {
         setStatus("No Quora /answers tab to move to a background window.");
+        minToggle.checked = false;
         return;
       }
-      runMinBtn.disabled = true;
+      minToggle.disabled = true;
       try {
-        // chrome.windows from this embedded iframe can be unreliable, so route
-        // the detach through the service worker. It moves the Quora tab into
-        // its own minimized, unfocused window; the in-page panel rides along,
-        // so an in-flight scrape keeps running out of the way.
         var resp = await chrome.runtime.sendMessage({
           type: "runMinimized",
           tabId: tab.id,
         });
         if (resp && resp.ok) {
           setStatus("Moved to a minimized background window — scraping keeps running there.");
+          logTeletype("run-minimized on — scraping continues in a background window", "ok");
         } else {
           setStatus("Could not minimize: " + ((resp && resp.error) || "unknown error"));
+          minToggle.checked = false;
         }
       } catch (err) {
         if (isContextInvalidated(err)) {
@@ -1432,8 +1998,9 @@
         } else {
           setStatus("Could not minimize: " + (err.message || err));
         }
+        minToggle.checked = false;
       } finally {
-        runMinBtn.disabled = false;
+        minToggle.disabled = false;
       }
     });
   }
