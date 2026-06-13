@@ -757,16 +757,21 @@
     if (!tab || !tab.url) return null;
     var profileUrl = profileUrlFromAnswers(tab.url);
     if (!profileUrl) return null;
-    if (profileUrl !== activeProfileUrl) maxAutoFilled = false;
+    // On a profile change, drop the previous profile's numbers and the
+    // one-shot prefill guard so we never SHOW or auto-fill another profile's
+    // total while the new one is still loading. (profileState is module-level
+    // and the embedded panel survives tab navigation, so it would otherwise
+    // keep displaying a stale total.)
+    if (profileUrl !== activeProfileUrl) {
+      profileState.total = null;
+      profileState.saved = null;
+      maxAutoFilled = false;
+    }
     activeProfileUrl = profileUrl;
 
-    var cached = await readProfileCache(profileUrl);
-    if (cached != null) {
-      profileState.total = cached;
-      renderProfilePanel(false);
-      return cached;
-    }
-
+    // Prefer FRESHNESS on open: read the CURRENT active tab's DOM first so a
+    // stale per-profile cache entry (or a TTL-window count from before a new
+    // ingest) never wins over what the live page reports.
     renderProfilePanel(true);
     var fromActive = await readStatsFromTab(tab.id);
     if (fromActive != null) {
@@ -774,6 +779,16 @@
       writeProfileCache(profileUrl, fromActive);
       renderProfilePanel(false);
       return fromActive;
+    }
+
+    // Active tab couldn't yield a number (not loaded / DOM changed) — fall back
+    // to THIS profile's own cached value (scoped per profile URL) before the
+    // expensive background-tab fetch.
+    var cached = await readProfileCache(profileUrl);
+    if (cached != null) {
+      profileState.total = cached;
+      renderProfilePanel(false);
+      return cached;
     }
 
     var bgTab = null;
@@ -813,6 +828,79 @@
       profileState.fetchPromise = null;
     });
     return profileState.fetchPromise;
+  }
+
+  // Enable "Scrape this tab" ONLY when the active target tab is a Quora profile
+  // /answers page. Otherwise grey it out and explain why. Never overrides the
+  // mid-run disabled state (the click handler owns that while a session runs).
+  function updateScrapeGate(tab) {
+    if (!startBtn) return false;
+    if (session.active) return false;
+    var ok = !!(tab && isAnswersPage(tab.url));
+    startBtn.disabled = !ok;
+    startBtn.title = ok
+      ? "Scrape this Quora /answers page"
+      : "Open a Quora profile /answers page to enable scraping.";
+    return ok;
+  }
+
+  // Re-resolve the active target tab, then re-gate the Scrape button and
+  // (re)load the per-profile total when the resolved profile changed. Called on
+  // popup open and whenever the active/updated tab changes.
+  function refreshTargetTab(opts) {
+    opts = opts || {};
+    return resolveTargetTab()
+      .then(function (tab) {
+        if (!tab || !tab.id) {
+          updateScrapeGate(null);
+          if (!session.active) {
+            hideProfilePanel();
+            if (opts.announce) {
+              setStatus("Open a Quora /answers tab, then click the qsbk icon.");
+            } else {
+              setStatus("Scrape disabled — open a Quora profile /answers page.");
+            }
+          }
+          return null;
+        }
+        targetTabId = tab.id;
+        updateScrapeGate(tab);
+        if (!session.active) {
+          var profileUrl = profileUrlFromAnswers(tab.url);
+          if (
+            !profileState.fetchPromise &&
+            (profileUrl !== activeProfileUrl || profileState.total == null)
+          ) {
+            loadProfileTotal(tab);
+          }
+          if (opts.announce) setStatus("Ready — session stats reset.");
+        }
+        return tab;
+      })
+      .catch(function () {
+        return null;
+      });
+  }
+
+  var tabWatchTimer = null;
+  function scheduleTabRefresh() {
+    if (contextDead || !extensionAlive()) return;
+    if (tabWatchTimer) clearTimeout(tabWatchTimer);
+    tabWatchTimer = setTimeout(function () {
+      tabWatchTimer = null;
+      refreshTargetTab();
+    }, 250);
+  }
+
+  function watchActiveTabChanges() {
+    try {
+      chrome.tabs.onActivated.addListener(scheduleTabRefresh);
+      chrome.tabs.onUpdated.addListener(function (id, info) {
+        if (info && (info.status === "complete" || info.url)) scheduleTabRefresh();
+      });
+    } catch (e) {
+      /* tabs API unavailable — gate still evaluated on open */
+    }
   }
 
   function configureServeUrls(base) {
@@ -1047,6 +1135,9 @@
     if (embedded && dragHandle) {
       dragHandle.classList.add("hidden");
     }
+    // Start gated OFF until we confirm the active tab is a /answers page.
+    updateScrapeGate(null);
+
     await new Promise(function (resolve) {
       loadServeConfig(resolve);
     });
@@ -1057,15 +1148,8 @@
     var stored = await chrome.storage.session.get(["qsbkTargetTabId"]);
     targetTabId = stored.qsbkTargetTabId || null;
 
-    var tab = await resolveTargetTab();
-    if (!tab || !tab.id) {
-      hideProfilePanel();
-      setStatus("Open a Quora /answers tab, then click the qsbk icon.");
-      return;
-    }
-    targetTabId = tab.id;
-    setStatus("Ready — session stats reset.");
-    loadProfileTotal(tab);
+    watchActiveTabChanges();
+    await refreshTargetTab({ announce: true });
   }
 
   startBtn.addEventListener("click", async function () {
@@ -1279,7 +1363,9 @@
       }
       endSession();
       await refreshProfileSaved();
-      startBtn.disabled = false;
+      // Re-enable respecting the is-answers-page gate so we never leave a
+      // non-/answers tab with an active Scrape button after a run finishes.
+      updateScrapeGate(await resolveTargetTab());
     }
   });
 
