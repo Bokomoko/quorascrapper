@@ -1,0 +1,1326 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>qsbk dashboard — mockup</title>
+    <!-- Cool dashboard numerals. NOTE: remote webfont is fine for this localhost
+         mockup; when porting to the extension, bundle the woff2 locally (CSP). -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&display=swap" rel="stylesheet" />
+    <!--
+      STANDALONE MOCKUP / PLAYGROUND for the qsbk control-panel dashboard.
+      Zero backend: every "live" value is produced by the built-in JS simulator
+      below (see the SIM CONFIG block). Nothing here talks to the extension,
+      `qsbk serve`, Kafka or Mongo. This file is intentionally self-contained
+      (inline CSS + inline JS + inline SVG, no CDN) so it reloads instantly and
+      can be examined under a strict context.
+
+      Pipeline vocabulary mirrors the real popup: captured -> sent -> saved.
+    -->
+    <style>
+      /* Cohesive pipeline color system — one color per stage, reused by the
+         clock accents, gauge needles, sparkline, queue bars and legend so every
+         "captured / sent / saved" marker matches everywhere. */
+      :root {
+        --c-captured: #06b6d4;
+        --c-sent: #f59e0b;
+        --c-saved: #10b981;
+        --c-target: #94a3b8;
+
+        --bg: #060a14;
+        --panel: #0d1424;
+        --panel-2: #111a2e;
+        --line: #1e293b;
+        --ink: #e2e8f0;
+        --muted: #64748b;
+        --muted-2: #94a3b8;
+        --radius: 12px;
+        --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+        --num: "Orbitron", var(--mono);
+        --known: #46566f;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        background:
+          radial-gradient(1200px 600px at 50% -10%, #0f1c34 0%, transparent 60%),
+          var(--bg);
+        color: var(--ink);
+        font-family: system-ui, -apple-system, sans-serif;
+        display: flex;
+        justify-content: center;
+        padding: 24px 16px 48px;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      /* The whole dashboard scales gracefully: comfortable around 360–520px,
+         expands to a roomier two-column layout past 720px. */
+      .panel {
+        width: 100%;
+        max-width: 520px;
+        background: linear-gradient(180deg, #0c1322, #0a0f1c);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+        overflow: hidden;
+      }
+
+      .titlebar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 16px;
+        background: linear-gradient(180deg, #121b30, #0d1424);
+        border-bottom: 1px solid var(--line);
+      }
+      .titlebar .brand {
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        font-size: 14px;
+      }
+      .titlebar .brand small {
+        font-family: var(--num);
+        font-weight: 500;
+        color: var(--c-captured);
+        font-size: 11px;
+        margin-left: 6px;
+        letter-spacing: 0.04em;
+      }
+      /* Minimize-to-window toggle switch, sitting next to the status pill. */
+      .switch {
+        margin-left: auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .switch input { display: none; }
+      .switch-track {
+        position: relative;
+        width: 30px; height: 16px;
+        border-radius: 999px;
+        background: #1b2436;
+        border: 1px solid var(--line);
+        transition: background 0.2s;
+      }
+      .switch-thumb {
+        position: absolute;
+        top: 1px; left: 1px;
+        width: 12px; height: 12px;
+        border-radius: 50%;
+        background: var(--muted-2);
+        transition: transform 0.2s, background 0.2s;
+      }
+      .switch input:checked + .switch-track { background: var(--c-captured); }
+      .switch input:checked + .switch-track .switch-thumb { transform: translateX(14px); background: #04221a; }
+      .switch-text {
+        font-size: 10px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--muted-2);
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--muted-2);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 4px 10px;
+        background: #0a1120;
+      }
+      .pill .dot {
+        width: 8px; height: 8px; border-radius: 50%;
+        background: var(--muted);
+        transition: background 0.3s, box-shadow 0.3s;
+      }
+      .pill.is-running .dot {
+        background: var(--c-saved);
+        box-shadow: 0 0 8px var(--c-saved);
+      }
+      .pill.is-idle .dot {
+        background: var(--c-saved);
+        box-shadow: 0 0 8px var(--c-saved);
+      }
+      /* "Page Check!" alert state — before we detect a Quora /answers tab. */
+      .pill.is-alert {
+        color: #fca5a5;
+        border-color: #7f1d1d;
+        background: #210b0b;
+        cursor: help;
+      }
+      .pill.is-alert .dot {
+        background: #ef4444;
+        box-shadow: 0 0 8px #ef4444;
+        animation: blink 1s ease-in-out infinite;
+      }
+      @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+      .body { padding: 14px; }
+
+      /* ── Dashboard: clock + speed visualizations ─────────────────────── */
+      .dash {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-bottom: 12px;
+        align-items: stretch;
+      }
+      /* Left column: clock stacked above the queue bars. */
+      .dash-left {
+        flex: 1 1 220px;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .clock {
+        flex: 0 0 auto;
+        min-width: 0;
+        background: linear-gradient(180deg, #0a1322, #070d18);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 8px 12px;
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 3px 8px;
+        align-items: baseline;
+        align-content: center;
+        box-shadow: inset 0 0 24px rgba(6, 182, 212, 0.04);
+      }
+      .clock-row-label {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--muted-2);
+      }
+      .clock-row-label,
+      .clock-row-value {
+        transition: color 0.3s, text-shadow 0.3s, opacity 0.3s;
+      }
+      /* Active rows all sit at ONE uniform brightness (no per-row colors). */
+      .clock-row-value {
+        font-family: var(--mono);
+        font-size: 15px;
+        font-weight: 700;
+        text-align: right;
+        letter-spacing: 0.04em;
+        color: var(--ink);
+        font-variant-numeric: tabular-nums;
+        text-shadow: 0 0 10px rgba(226, 232, 240, 0.16);
+      }
+      /* "Turned off" — every inactive row is uniformly unlit, like a dark
+         segment display: no glow, no color, no animation. */
+      .clock-row-value.off { color: #1d273b !important; text-shadow: none !important; animation: none; background: none !important; }
+      .clock-row-label.off { color: #28344c; }
+      /* Distinct color per clock row when lit (Now is red). :not(.off) keeps the
+         unlit state uniform; :not(.ready) lets the Start button styling win. */
+      #clk-start:not(.off):not(.tick)    { color: #34d399; text-shadow: 0 0 10px rgba(16,185,129,0.5); }
+      #lbl-start:not(.off):not(.btn)     { color: #34d399; text-shadow: 0 0 8px rgba(16,185,129,0.4); }
+      #clk-elapsed:not(.off)             { color: #22d3ee; text-shadow: 0 0 10px rgba(34,211,238,0.45); }
+      #row-now:not(.off)                 { color: #f87171; text-shadow: 0 0 10px rgba(248,113,113,0.55); }
+      #clk-remaining:not(.off)           { color: #fbbf24; text-shadow: 0 0 10px rgba(251,191,36,0.45); }
+      #clk-eta:not(.off)                 { color: #a78bfa; text-shadow: 0 0 10px rgba(167,139,250,0.45); }
+
+      /* Idle "Start": the LEGEND itself is the button; the value keeps a green
+         dimmed ticking clock. On start the button becomes a plain "Started at"
+         legend pointing at the frozen time. */
+      .clock-row-label.btn {
+        justify-self: start;
+        display: inline-block;
+        color: #04221a;
+        background: linear-gradient(180deg, #34d399, #10b981);
+        padding: 2px 12px;
+        border-radius: 7px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        cursor: pointer;
+        box-shadow: 0 0 12px rgba(16,185,129,0.5), inset 0 1px 0 rgba(255,255,255,0.3);
+        animation: startReady 1.4s ease-in-out infinite;
+      }
+      .clock-row-label.btn:hover { background: linear-gradient(180deg, #4ade80, #14c98c); }
+      .clock-row-label.btn:active { transform: translateY(1px); }
+      .clock-row-value.tick {
+        color: #2f8f6e;
+        text-shadow: 0 0 8px rgba(16,185,129,0.3);
+        animation: tickPulse 1.3s ease-in-out infinite;
+      }
+      @keyframes tickPulse { 0%,100% { opacity: 0.5; } 50% { opacity: 0.9; } }
+      @keyframes startReady {
+        0%,100% { box-shadow: 0 0 10px rgba(16,185,129,0.45), inset 0 1px 0 rgba(255,255,255,0.3); }
+        50% { box-shadow: 0 0 18px rgba(16,185,129,0.85), inset 0 1px 0 rgba(255,255,255,0.3); }
+      }
+
+      /* "Now" row carries the fire-drill emergency-stop button while running. */
+      .now-label { display: inline-flex; align-items: center; gap: 7px; }
+      .estop {
+        display: none;
+        width: 17px; height: 17px;
+        flex: none;
+        padding: 0;
+        border-radius: 50%;
+        border: 1.5px solid #fecaca;
+        background: radial-gradient(circle at 50% 34%, #ef4444, #991b1b);
+        color: #fff;
+        font-size: 5px; font-weight: 800; letter-spacing: 0.02em; line-height: 1;
+        font-family: var(--mono);
+        cursor: pointer;
+        box-shadow: 0 0 0 1.5px #7f1d1d, 0 0 9px rgba(239, 68, 68, 0.7);
+        animation: estopPulse 1.1s ease-in-out infinite;
+      }
+      .clock.running .estop { display: inline-flex; align-items: center; justify-content: center; }
+      .estop:hover { background: radial-gradient(circle at 50% 34%, #f87171, #dc2626); }
+      .estop:active { transform: translateY(1px); }
+      @keyframes estopPulse {
+        0%,100% { box-shadow: 0 0 0 2px #7f1d1d, 0 0 9px rgba(239, 68, 68, 0.55); }
+        50% { box-shadow: 0 0 0 2px #7f1d1d, 0 0 18px rgba(239, 68, 68, 0.95); }
+      }
+
+      .speed {
+        flex: 1 1 180px;
+        min-width: 0;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 10px 10px 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .speed svg { display: block; width: 100%; height: auto; }
+      .gauge-wrap { position: relative; }
+      /* Digital speedos in a row, between the dial and the tach subframe. */
+      .gauge-rates {
+        display: flex;
+        justify-content: space-around;
+        align-items: flex-end;
+        gap: 8px;
+        margin-top: 2px;
+      }
+      .grate { display: flex; flex-direction: column; align-items: center; line-height: 1; font-family: var(--mono); }
+      .grate b { font-family: var(--mono); font-size: 16px; font-weight: 800; text-shadow: 0 0 8px currentColor; }
+      .grate small {
+        margin-top: 2px;
+        font-size: 7px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        opacity: 0.85;
+      }
+      .gauge-unit {
+        text-align: center;
+        font-family: var(--mono);
+        font-size: 8px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin: 1px 0;
+      }
+      /* Subframe grouping the three tachograph panels, with room above. */
+      .tach-frame {
+        margin-top: 8px;
+        padding: 6px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: #0a1018;
+      }
+      .tach-head {
+        font-size: 8px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--muted);
+        margin: 0 2px 5px;
+      }
+      .spark-wrap {
+        background: #070d18;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 2px 3px;
+      }
+      /* Three stacked single-series panels. */
+      .sparks { display: flex; flex-direction: column; gap: 4px; }
+      .spark3-wrap {
+        position: relative;
+        background: #070d18;
+        border: 1px solid var(--line);
+        border-left-width: 3px;
+        border-radius: 5px;
+        padding: 1px 3px;
+      }
+      .spark3 { display: block; width: 100%; height: auto; }
+      .spark3-tag {
+        position: absolute;
+        top: 1px; left: 5px;
+        font-family: var(--mono);
+        font-size: 7px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        opacity: 0.8;
+      }
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 12px;
+        justify-content: center;
+        font-size: 10px;
+        color: var(--muted-2);
+      }
+      .legend span { display: inline-flex; align-items: center; gap: 5px; }
+      .legend i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+
+      /* ── Queue fill bars (data-driven; adding a 4th queue is trivial) ── */
+      .bars-panel {
+        flex: 1 1 auto;
+        display: flex;
+        align-items: stretch;
+        gap: 6px;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+      }
+      /* The max answer count, marked on both vertical axes (top) with 0 (bottom). */
+      .q-axis {
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        align-items: center;
+        font-family: var(--mono);
+        font-size: 9px;
+        font-weight: 700;
+        color: var(--muted-2);
+        padding: 22px 0 16px;
+      }
+      .q-axis .q-axis-zero { color: var(--muted); font-weight: 400; }
+      .queues {
+        flex: 1;
+        display: grid;
+        grid-template-columns: repeat(var(--queue-count, 3), 1fr);
+        gap: 8px;
+      }
+      .queue { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+      .queue-val { font-family: var(--mono); font-size: 16px; font-weight: 700; line-height: 1; }
+      .queue-track {
+        position: relative;
+        width: 100%;
+        max-width: 54px;
+        height: 96px;
+        background: #070d18;
+        border-radius: 7px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+      }
+      .queue-fill {
+        position: absolute;
+        left: 0; right: 0; bottom: 0;
+        height: 0%;
+        transition: height 0.5s cubic-bezier(0.22, 1, 0.36, 1), bottom 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+        box-shadow: 0 0 12px currentColor;
+      }
+      /* Grey, textured "already known / skipped" base — fills from the bottom of
+         every bar; the colored new-this-session fill stacks on top of it. */
+      .queue-known {
+        position: absolute;
+        left: 0; right: 0; bottom: 0;
+        height: 0%;
+        border-radius: 0 0 6px 6px;
+        background:
+          repeating-linear-gradient(45deg, #3a4760 0 2px, #232d40 2px 5px);
+        border-top: 1px solid #4a5a76;
+        transition: height 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+      }
+      .bars-legend {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted-2);
+      }
+      .bars-legend b { font-family: var(--mono); color: var(--known); }
+      .bl-swatch {
+        width: 14px; height: 10px;
+        border-radius: 2px;
+        border: 1px solid #4a5a76;
+        background: repeating-linear-gradient(45deg, #3a4760 0 2px, #232d40 2px 5px);
+      }
+      .queue-max {
+        position: absolute;
+        left: 0; right: 0;
+        font-size: 8px;
+        text-align: center;
+        color: var(--muted);
+        top: 3px;
+        font-family: var(--mono);
+        letter-spacing: 0.04em;
+      }
+      .queue-label {
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted-2);
+      }
+
+      /* ── Horizontal progress bar (fills left→right with the session) ─── */
+      .progress { margin-bottom: 12px; }
+      .progress-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--muted-2);
+        margin-bottom: 4px;
+      }
+      #prog-pct { color: var(--c-captured); font-weight: 700; font-size: 13px; }
+      .progress-track {
+        height: 10px;
+        background: #070d18;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        overflow: hidden;
+      }
+      .progress-fill {
+        height: 100%;
+        width: 0%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, var(--c-captured), var(--c-saved));
+        box-shadow: 0 0 10px rgba(6, 182, 212, 0.5);
+        transition: width 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+      }
+
+      /* ── Controls ─────────────────────────────────────────────────────── */
+      .controls { display: grid; gap: 10px; margin-bottom: 12px; }
+      .field { display: grid; gap: 4px; font-size: 12px; color: var(--muted-2); }
+      .field label { letter-spacing: 0.03em; }
+      .field input[type="number"],
+      .field select {
+        width: 100%;
+        padding: 8px 10px;
+        font-size: 13px;
+        background: #070d18;
+        color: var(--ink);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        font-family: inherit;
+      }
+      .field-row { display: flex; gap: 10px; }
+      .field-row .field { flex: 1; }
+
+      fieldset.options {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        margin: 0;
+        padding: 8px 12px 10px;
+        background: #0a1120;
+      }
+      fieldset.options legend {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--muted-2);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        padding: 0 6px;
+      }
+      .check-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        font-size: 12px;
+        line-height: 1.4;
+        color: var(--ink);
+      }
+      .check-row input[type="checkbox"] { margin: 2px 0 0; flex: none; }
+
+      .actions { display: flex; gap: 10px; }
+      #start {
+        flex: 1;
+        padding: 12px;
+        border: none;
+        border-radius: 9px;
+        font-weight: 700;
+        font-size: 14px;
+        letter-spacing: 0.03em;
+        cursor: pointer;
+        color: #04221a;
+        background: var(--c-saved);
+        box-shadow: 0 6px 18px rgba(16, 185, 129, 0.25);
+        transition: background 0.2s, box-shadow 0.2s, transform 0.05s;
+      }
+      #start:hover { background: #0fbe85; }
+      #start:active { transform: translateY(1px); }
+      #start.running {
+        color: #2a0f0f;
+        background: #f87171;
+        box-shadow: 0 6px 18px rgba(248, 113, 113, 0.25);
+      }
+      #start.running:hover { background: #fb8585; }
+      #start:disabled {
+        background: #1b2436;
+        color: #475569;
+        box-shadow: none;
+        cursor: not-allowed;
+      }
+
+      /* ── Teletype / console feed ─────────────────────────────────────── */
+      .tty {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: #070d18;
+        overflow: hidden;
+      }
+      .tty-head {
+        font-size: 10px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--muted);
+        padding: 7px 12px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .tty.collapsed .tty-head { border-bottom: none; }
+      .tty-caret {
+        display: inline-block;
+        font-size: 9px;
+        color: var(--muted-2);
+        transition: transform 0.2s;
+      }
+      .tty.collapsed .tty-caret { transform: rotate(-90deg); }
+      .tty.collapsed #teletype { display: none; }
+      .tty-head::before {
+        content: "";
+        width: 7px; height: 7px; border-radius: 50%;
+        background: var(--c-saved);
+        box-shadow: 0 0 6px var(--c-saved);
+      }
+      .tty-head .status {
+        margin-left: auto;
+        max-width: 62%;
+        text-align: right;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        color: var(--muted-2);
+        text-transform: none;
+        letter-spacing: 0;
+      }
+      #teletype {
+        font-family: var(--mono);
+        font-size: 11px;
+        line-height: 1.55;
+        color: #cbd5e1;
+        padding: 8px 12px;
+        max-height: 150px;
+        overflow-y: auto;
+      }
+      #teletype .tty-line { white-space: pre-wrap; word-break: break-word; }
+      #teletype .tty-time { color: #475569; margin-right: 7px; }
+      #teletype .tty-line.info .tty-msg { color: #cbd5e1; }
+      #teletype .tty-line.ok .tty-msg { color: var(--c-saved); }
+      #teletype .tty-line.warn .tty-msg { color: var(--c-sent); }
+      #teletype .tty-line.err .tty-msg { color: #f87171; }
+      #teletype .tty-line.cap .tty-msg { color: var(--c-captured); }
+
+      .mock-note {
+        margin: 12px 2px 0;
+        font-size: 10px;
+        color: var(--muted);
+        line-height: 1.45;
+        text-align: center;
+      }
+
+      /* Wider viewports: give the dashboard more room, two-up controls. */
+      @media (min-width: 720px) {
+        .panel { max-width: 720px; }
+        .clock { flex: 1 1 260px; }
+        .speed { flex: 1 1 240px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="panel">
+      <div class="titlebar">
+        <span class="brand">qsbk <small id="ext-version">v0.4.2</small></span>
+        <label class="switch" id="min-switch" title="Run minimized in a background window — keeps scraping if you switch tabs">
+          <input type="checkbox" id="min-toggle" />
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+          <span class="switch-text">min</span>
+        </label>
+        <span class="pill is-idle" id="run-pill"><span class="dot"></span><span id="run-state">idle</span></span>
+      </div>
+
+      <div class="body">
+        <!-- (A) Clock panel + (B) speed visualizations -->
+        <div class="dash">
+          <div class="dash-left">
+          <div class="clock" id="clock-panel">
+            <span class="clock-row-label off" id="lbl-start">Start</span>
+            <span class="clock-row-value off" id="clk-start">--:--:--</span>
+            <span class="clock-row-label off" id="lbl-elapsed">Elapsed</span>
+            <span class="clock-row-value off" id="clk-elapsed">+00:00:00</span>
+            <span class="clock-row-label off now-label" id="lbl-now">Now<button id="estop" class="estop" type="button" title="Emergency stop" aria-label="Emergency stop">STOP</button></span>
+            <span class="clock-row-value off" id="row-now"><span id="clk-now">--:--:--</span></span>
+            <span class="clock-row-label off" id="lbl-remaining">Remaining</span>
+            <span class="clock-row-value off" id="clk-remaining">+--:--:--</span>
+            <span class="clock-row-label off" id="lbl-eta">ETA</span>
+            <span class="clock-row-value off" id="clk-eta">--:--:--</span>
+          </div>
+          <!-- (C) Queue fill bars — rendered from QUEUES[]; add a 4th and it just works.
+               Max answer count is marked on BOTH vertical axes. -->
+          <div class="bars-panel">
+            <div class="q-axis"><span id="q-axis-max-l">0</span><span class="q-axis-zero">0</span></div>
+            <div class="queues" id="queues"></div>
+            <div class="q-axis"><span id="q-axis-max-r">0</span><span class="q-axis-zero">0</span></div>
+          </div>
+          <div class="bars-legend">
+            <span class="bl-swatch"></span> known / skipped <b id="known-count">0</b>
+          </div>
+          </div>
+          <div class="speed">
+            <!-- Digital speedos arranged around the dial, following its curve:
+                 captured (left, up), sent (center, below), saved (right, up). -->
+            <div class="gauge-wrap">
+              <svg id="gauge" viewBox="0 0 120 76" role="img" aria-label="Throughput speedometer"></svg>
+            </div>
+            <!-- Digital speedos in a row, in the room between dial and tachs. -->
+            <div class="gauge-rates">
+              <span class="grate" style="color: var(--c-captured)"><b id="rate-captured">0</b><small>captured</small></span>
+              <span class="grate" style="color: var(--c-sent)"><b id="rate-sent">0</b><small>sent</small></span>
+              <span class="grate" style="color: var(--c-saved)"><b id="rate-saved">0</b><small>saved</small></span>
+            </div>
+            <div class="gauge-unit">answers / min</div>
+            <!-- Tachograph subframe: three stacked single-series panels. -->
+            <div class="tach-frame">
+              <div class="tach-head">tachograph</div>
+              <div class="sparks" id="sparks"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Overall progress toward the new-answers target -->
+        <div class="progress">
+          <div class="progress-head">
+            <span id="prog-tally">0 / 0 new</span>
+            <span id="prog-pct">0%</span>
+          </div>
+          <div class="progress-track"><div class="progress-fill" id="prog-fill"></div></div>
+        </div>
+
+        <!-- (D) Controls -->
+        <div class="controls">
+          <div class="field-row">
+            <div class="field">
+              <label for="output">Output</label>
+              <select id="output">
+                <option value="kafka" selected>Kafka (via qsbk serve)</option>
+                <option value="json">JSON file download</option>
+                <option value="csv">CSV file download</option>
+              </select>
+            </div>
+          </div>
+          <fieldset class="options">
+            <legend>Options</legend>
+            <label class="check-row">
+              <input id="force" type="checkbox" />
+              Force re-collect (ignore known; re-publish to upgrade content)
+            </label>
+          </fieldset>
+        </div>
+
+        <!-- (E) Teletype / console feed (collapsible; hidden by default) -->
+        <div class="tty collapsed" id="tty">
+          <div class="tty-head" id="tty-head">
+            <span class="tty-caret" id="tty-caret">▾</span>
+            console
+            <span class="status" id="status">Checking page…</span>
+          </div>
+          <div id="teletype"></div>
+        </div>
+
+        <p class="mock-note">
+          Simulated playground — no backend. Press the glowing green <strong>START</strong> (top of the clock) to begin; the red <strong>STOP</strong> beside <strong>Now</strong> halts it.
+        </p>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        "use strict";
+
+        /* ════════════════════════════════════════════════════════════════
+           SIM CONFIG — tweak these constants to change how the mockup feels.
+           ════════════════════════════════════════════════════════════════ */
+        var CONFIG = {
+          captureRatePerSec: 4.5,   // answers "captured" per second when running
+          jitter: 0.55,             // 0..1 randomness applied to per-tick rate
+          sentLagFrac: 0.86,        // fraction of captured that has been "sent"
+          savedLagFrac: 0.66,       // fraction of captured that has been "saved"
+          stageSmoothing: 0.18,     // how fast sent/saved chase their targets
+          tickMs: 1000,             // sparkline / clock cadence (~1Hz)
+          sparkSamples: 40,         // bars retained in the scrolling sparkline
+          gaugeStartMax: 200,       // initial gauge full-scale (answers/min)
+          idleGaugeMax: 200,        // gauge full-scale while idle
+          targetMax: 240,           // total answers on the profile (both axes max)
+          knownStart: 70,           // already-saved/known (the grey /known base)
+          loginWallChance: 0,       // per-tick chance of a simulated login wall (0 = only via debug hook)
+        };
+
+        /* Pipeline stages — the SINGLE source of truth for queues, legend
+           order and teletype color. Add a 4th entry (e.g. classified) and the
+           queue grid + bars render automatically. Colors match the CSS vars. */
+        var QUEUES = [
+          { key: "captured", label: "Captured", color: "#06b6d4" },
+          { key: "sent",     label: "Sent",     color: "#f59e0b" },
+          { key: "saved",    label: "Saved",    color: "#10b981" },
+        ];
+
+        var STAGE_COLOR = {};
+        QUEUES.forEach(function (q) { STAGE_COLOR[q.key] = q.color; });
+
+        /* ── DOM refs ─────────────────────────────────────────────────── */
+        var $ = function (id) { return document.getElementById(id); };
+        var clockPanel = $("clock-panel");
+        var clkStart = $("clk-start");
+        var clkElapsed = $("clk-elapsed");
+        var clkNow = $("clk-now");
+        var rowNow = $("row-now");
+        var clkRemaining = $("clk-remaining");
+        var clkEta = $("clk-eta");
+        var lblStart = $("lbl-start");
+        var lblElapsed = $("lbl-elapsed");
+        var lblNow = $("lbl-now");
+        var lblRemaining = $("lbl-remaining");
+        var lblEta = $("lbl-eta");
+        var estopBtn = $("estop");
+        var gaugeEl = $("gauge");
+        var rateCaptured = $("rate-captured");
+        var rateSent = $("rate-sent");
+        var rateSaved = $("rate-saved");
+        var sparksEl = $("sparks");
+        var sparkEls = {};
+        var queuesEl = $("queues");
+        var axisMaxL = $("q-axis-max-l");
+        var axisMaxR = $("q-axis-max-r");
+        var knownCountEl = $("known-count");
+        var progFill = $("prog-fill");
+        var progTally = $("prog-tally");
+        var progPct = $("prog-pct");
+        var minToggle = $("min-toggle");
+        var ttyEl = $("tty");
+        var ttyHead = $("tty-head");
+        var teletypeEl = $("teletype");
+        var statusEl = $("status");
+        var forceEl = $("force");
+        var runPill = $("run-pill");
+        var runState = $("run-state");
+
+        var PAGE_HINT = "Open a Quora profile answers page — e.g. https://quora.com/<profile>/answers — then START arms.";
+
+        /* ── Time helpers (24-hour clock only, per repo convention) ────── */
+        function pad2(n) { return n < 10 ? "0" + n : String(n); }
+        function formatClockHMS(ms) {
+          var t = Math.max(0, Math.floor(ms / 1000));
+          return pad2(Math.floor(t / 3600)) + ":" + pad2(Math.floor((t % 3600) / 60)) + ":" + pad2(t % 60);
+        }
+        function formatWallClock(d) {
+          return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds());
+        }
+
+        /* ── Simulator state ──────────────────────────────────────────── */
+        var sim = {
+          running: false,
+          pageOk: false,          // simulated "on a Quora /answers page" check
+          startedAt: null,
+          counts: { captured: 0, sent: 0, saved: 0 },
+          max: 240,
+          known: 70,              // already-known/skipped baseline (grey filler)
+          speedHistory: [],       // [{cap,sent,saved}] instantaneous /min, newest last
+          inst: 0,                // smoothed instantaneous captured rate
+          instSent: 0,
+          instSaved: 0,
+          gaugeMax: CONFIG.idleGaugeMax,
+          queueMax: {},           // running max observed per stage
+          lastTickAt: 0,
+        };
+        QUEUES.forEach(function (q) { sim.queueMax[q.key] = 1; });
+
+        function ratePerMin(count, elapsedMs) {
+          if (!elapsedMs || count <= 0) return 0;
+          return count / (elapsedMs / 60000);
+        }
+        // New answers still to collect this session = total − already known.
+        function newTarget() { return Math.max(1, sim.max - sim.known); }
+
+        /* ── (A) Clock panel ──────────────────────────────────────────── */
+        // mode: "off" (unlit) | "on" (uniform active) | "ready" (green blink)
+        function setRow(labelEl, valueEl, mode) {
+          labelEl.classList.remove("off", "ready");
+          valueEl.classList.remove("off", "ready");
+          if (mode === "off") { labelEl.classList.add("off"); valueEl.classList.add("off"); }
+          else if (mode === "ready") { labelEl.classList.add("ready"); valueEl.classList.add("ready"); }
+        }
+
+        function renderClock() {
+          var now = new Date();
+          var running = sim.running && sim.startedAt;
+
+          // NOW — only lit while running
+          if (running) {
+            clkNow.textContent = formatWallClock(now);
+            setRow(lblNow, rowNow, "on");
+          } else {
+            clkNow.textContent = "--:--:--";
+            setRow(lblNow, rowNow, "off");
+          }
+
+          // START — frozen+lit while running; idle shows ticking current time
+          // in green "ready" glow, but ONLY once the /answers page check passes.
+          // Start row: the LEGEND is the button; the value keeps a green tick.
+          lblStart.classList.remove("btn", "off");
+          clkStart.classList.remove("tick", "off");
+          if (running) {
+            // Button disappears: legend reads "Started at" → frozen first clock.
+            lblStart.textContent = "Started at";
+            clkStart.textContent = formatWallClock(new Date(sim.startedAt));
+          } else if (sim.pageOk) {
+            // Armed: legend is the pressable button; value ticks green-dimmed.
+            lblStart.textContent = "Start";
+            lblStart.classList.add("btn");
+            clkStart.textContent = formatWallClock(now);
+            clkStart.classList.add("tick");
+          } else {
+            lblStart.textContent = "Start";
+            lblStart.classList.add("off");
+            clkStart.textContent = "--:--:--";
+            clkStart.classList.add("off");
+          }
+
+          // ELAPSED
+          var elapsedMs = running ? Date.now() - sim.startedAt : 0;
+          if (running) {
+            clkElapsed.textContent = "+" + formatClockHMS(elapsedMs);
+            setRow(lblElapsed, clkElapsed, "on");
+          } else {
+            clkElapsed.textContent = "+00:00:00";
+            setRow(lblElapsed, clkElapsed, "off");
+          }
+
+          // REMAINING / ETA
+          var done = sim.counts.captured;
+          var rate = ratePerMin(done, elapsedMs);
+          var remainingCount = Math.max(0, newTarget() - done);
+          var complete = running && done >= newTarget();
+          var haveEta = running && rate > 0 && remainingCount > 0;
+          var remMs = haveEta ? (remainingCount / rate) * 60000 : 0;
+
+          if (complete) {
+            clkRemaining.textContent = "+00:00:00"; setRow(lblRemaining, clkRemaining, "on");
+            clkEta.textContent = formatWallClock(now); setRow(lblEta, clkEta, "on");
+          } else if (haveEta) {
+            clkRemaining.textContent = "+" + formatClockHMS(remMs); setRow(lblRemaining, clkRemaining, "on");
+            clkEta.textContent = formatWallClock(new Date(Date.now() + remMs)); setRow(lblEta, clkEta, "on");
+          } else {
+            clkRemaining.textContent = "+--:--:--"; setRow(lblRemaining, clkRemaining, "off");
+            clkEta.textContent = "--:--:--"; setRow(lblEta, clkEta, "off");
+          }
+        }
+
+        /* ── (B) Speedometer gauge (semicircle, value 0 on the left) ───── */
+        function gaugePoint(frac, r) {
+          frac = Math.max(0, Math.min(1, frac));
+          var a = (180 - frac * 180) * (Math.PI / 180);
+          return { x: 60 + r * Math.cos(a), y: 64 - r * Math.sin(a) };
+        }
+        function arcPoints(r, steps) {
+          var pts = [];
+          for (var i = 0; i <= steps; i++) {
+            var p = gaugePoint(i / steps, r);
+            pts.push(p.x.toFixed(1) + "," + p.y.toFixed(1));
+          }
+          return pts.join(" ");
+        }
+        function gaugeNeedle(frac, color, width) {
+          var p = gaugePoint(frac, 40);
+          return '<line x1="60" y1="64" x2="' + p.x.toFixed(1) + '" y2="' + p.y.toFixed(1) +
+            '" stroke="' + color + '" stroke-width="' + (width || 2.4) +
+            '" stroke-linecap="round" />';
+        }
+
+        function niceCeil(v) {
+          if (v <= 10) return 10;
+          var p = Math.pow(10, Math.floor(Math.log10(v)));
+          var f = v / p;
+          var n = f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10;
+          return n * p;
+        }
+
+        function renderGauge() {
+          var capRate = sim.running ? sim.inst : 0;
+          var sentRate = sim.running ? sim.instSent : 0;
+          var savedRate = sim.running ? sim.instSaved : 0;
+
+          // Dynamic full-scale: track the greatest instant speed across all
+          // stages over the recent window so the dial auto-ranges up AND down.
+          var recentPeak = 1;
+          for (var s = 0; s < sim.speedHistory.length; s++) {
+            var h = sim.speedHistory[s];
+            recentPeak = Math.max(recentPeak, h.cap, h.sent, h.saved);
+          }
+          recentPeak = Math.max(recentPeak, capRate, sentRate, savedRate);
+          sim.gaugeMax = Math.max(20, niceCeil(recentPeak * 1.2));
+
+          var parts = [];
+          // colored progress arc up to the captured fraction
+          parts.push('<polyline fill="none" stroke="#16223a" stroke-width="8" stroke-linecap="round" points="' + arcPoints(48, 48) + '" />');
+          var prog = Math.max(0, Math.min(1, capRate / sim.gaugeMax));
+          if (prog > 0.001) {
+            parts.push('<polyline fill="none" stroke="' + STAGE_COLOR.captured +
+              '" stroke-width="8" stroke-linecap="round" opacity="0.9" points="' +
+              arcPoints(48, Math.max(1, Math.round(48 * prog))) + '" />');
+          }
+          // ticks
+          [0, 0.25, 0.5, 0.75, 1].forEach(function (f) {
+            var o = gaugePoint(f, 46), i2 = gaugePoint(f, 38);
+            parts.push('<line x1="' + o.x.toFixed(1) + '" y1="' + o.y.toFixed(1) + '" x2="' +
+              i2.x.toFixed(1) + '" y2="' + i2.y.toFixed(1) + '" stroke="#3b4a63" stroke-width="1.4" />');
+          });
+          // needles: saved → sent → captured (captured on top)
+          parts.push(gaugeNeedle(savedRate / sim.gaugeMax, STAGE_COLOR.saved, 2));
+          parts.push(gaugeNeedle(sentRate / sim.gaugeMax, STAGE_COLOR.sent, 2));
+          parts.push(gaugeNeedle(capRate / sim.gaugeMax, STAGE_COLOR.captured, 2.8));
+          parts.push('<circle cx="60" cy="64" r="4" fill="#0a1120" stroke="#3b4a63" stroke-width="1.2" />');
+          // scale labels
+          parts.push('<text x="12" y="74" fill="#475569" font-size="6" font-family="monospace">0</text>');
+          parts.push('<text x="103" y="74" fill="#475569" font-size="6" font-family="monospace">' + sim.gaugeMax + '</text>');
+          gaugeEl.innerHTML = parts.join("");
+
+          rateCaptured.textContent = Math.round(capRate);
+          rateSent.textContent = Math.round(sentRate);
+          rateSaved.textContent = Math.round(savedRate);
+        }
+
+        /* ── (B) Three stacked single-series tachograph panels ─────────── */
+        // sparkKey maps each queue stage to its history field.
+        var SPARK_KEY = { captured: "cap", sent: "sent", saved: "saved" };
+        function buildSparks() {
+          sparksEl.innerHTML = "";
+          sparkEls = {};
+          QUEUES.forEach(function (q) {
+            var wrap = document.createElement("div");
+            wrap.className = "spark3-wrap";
+            wrap.style.borderLeftColor = q.color;
+            wrap.innerHTML =
+              '<span class="spark3-tag" style="color:' + q.color + '">' + q.label + '</span>' +
+              '<svg class="spark3" viewBox="0 0 120 22" preserveAspectRatio="none" aria-label="' + q.label + ' throughput"></svg>';
+            sparksEl.appendChild(wrap);
+            sparkEls[q.key] = wrap.querySelector("svg");
+          });
+        }
+
+        function renderSpark() {
+          var H = 22, W = 120, pad = 2;
+          // Shared vertical scale across all three panels for fair comparison.
+          var maxv = 1;
+          for (var i = 0; i < sim.speedHistory.length; i++) {
+            var h = sim.speedHistory[i];
+            maxv = Math.max(maxv, h.cap, h.sent, h.saved);
+          }
+          var bw = W / CONFIG.sparkSamples;
+          QUEUES.forEach(function (q) {
+            var svg = sparkEls[q.key];
+            if (!svg) return;
+            if (!sim.speedHistory.length) { svg.innerHTML = ""; return; }
+            var field = SPARK_KEY[q.key];
+            var pts = [];
+            for (var j = 0; j < sim.speedHistory.length; j++) {
+              var v = sim.speedHistory[j][field];
+              var x = j * bw;
+              var y = (H - pad) - (v / maxv) * (H - pad * 2);
+              pts.push(x.toFixed(2) + "," + y.toFixed(2));
+            }
+            svg.innerHTML = '<polyline fill="none" stroke="' + q.color + '" stroke-width="1.3" ' +
+              'stroke-linejoin="round" stroke-linecap="round" points="' + pts.join(" ") + '" />';
+          });
+        }
+
+        /* ── (C) Queue fill bars (built once from QUEUES, updated per tick) */
+        var queueEls = {};
+        function buildQueues() {
+          queuesEl.style.setProperty("--queue-count", QUEUES.length);
+          queuesEl.innerHTML = "";
+          QUEUES.forEach(function (q) {
+            var wrap = document.createElement("div");
+            wrap.className = "queue";
+            wrap.innerHTML =
+              '<span class="queue-val" style="color:' + q.color + '">0</span>' +
+              '<div class="queue-track">' +
+                '<div class="queue-known"></div>' +
+                '<div class="queue-fill" style="background:' + q.color + ';color:' + q.color + '"></div>' +
+              '</div>' +
+              '<span class="queue-label">' + q.label + '</span>';
+            queuesEl.appendChild(wrap);
+            queueEls[q.key] = {
+              val: wrap.querySelector(".queue-val"),
+              fill: wrap.querySelector(".queue-fill"),
+              known: wrap.querySelector(".queue-known"),
+            };
+          });
+        }
+
+        function renderQueues() {
+          // Full-scale for every bar AND both axes = the total number of answers.
+          // Each bar = grey /known base (from the bottom) + colored new-this-session
+          // fill stacked on top, both scaled to the total.
+          var total = Math.max(1, sim.max);
+          var knownPct = Math.max(0, Math.min(100, (sim.known / total) * 100));
+          QUEUES.forEach(function (q) {
+            var n = Math.floor(sim.counts[q.key]);
+            var els = queueEls[q.key];
+            els.val.textContent = n.toLocaleString();
+            var pct = Math.max(0, Math.min(100 - knownPct, (n / total) * 100));
+            els.known.style.height = knownPct + "%";
+            els.fill.style.bottom = knownPct + "%";
+            els.fill.style.height = pct + "%";
+          });
+          var maxLabel = total.toLocaleString();
+          axisMaxL.textContent = maxLabel;
+          axisMaxR.textContent = maxLabel;
+          knownCountEl.textContent = Math.round(sim.known).toLocaleString();
+        }
+
+        /* ── (E) Teletype / console feed ──────────────────────────────── */
+        function logTeletype(msg, kind) {
+          if (!msg) return;
+          var line = document.createElement("div");
+          line.className = "tty-line " + (kind || "info");
+          line.innerHTML = '<span class="tty-time">' + formatWallClock(new Date()) +
+            '</span><span class="tty-msg"></span>';
+          line.querySelector(".tty-msg").textContent = msg;
+          teletypeEl.appendChild(line);
+          while (teletypeEl.childNodes.length > 200) teletypeEl.removeChild(teletypeEl.firstChild);
+          teletypeEl.scrollTop = teletypeEl.scrollHeight;
+        }
+        function setStatus(text) { statusEl.textContent = text; }
+
+        /* ════════════════════════════════════════════════════════════════
+           SIMULATOR LOOP — one ~1Hz tick advances counts, computes the
+           instantaneous rate (feeds gauge + sparkline), tracks running max,
+           and emits occasional teletype banners.
+           ════════════════════════════════════════════════════════════════ */
+        var lastSent = 0, lastSaved = 0, ttySentAcc = 0, ttySavedAcc = 0;
+
+        function tick() {
+          var now = Date.now();
+          var dt = sim.lastTickAt ? (now - sim.lastTickAt) / 1000 : CONFIG.tickMs / 1000;
+          sim.lastTickAt = now;
+
+          if (sim.running) {
+            // Random simulated login wall (usually 0; trigger via window.simLoginWall()).
+            if (CONFIG.loginWallChance && Math.random() < CONFIG.loginWallChance) {
+              raiseLoginWall();
+              return;
+            }
+            var prevCap = sim.counts.captured;
+            var prevSent = sim.counts.sent;
+            var prevSaved = sim.counts.saved;
+            // captured advances at the configured rate with some jitter
+            var jitter = 1 + (Math.random() * 2 - 1) * CONFIG.jitter;
+            var add = CONFIG.captureRatePerSec * dt * jitter;
+            sim.counts.captured = Math.min(newTarget(), sim.counts.captured + add);
+
+            // sent / saved chase captured (downstream lag)
+            var capTarget = sim.counts.captured;
+            var sentTarget = capTarget * CONFIG.sentLagFrac;
+            var savedTarget = capTarget * CONFIG.savedLagFrac;
+            sim.counts.sent += (sentTarget - sim.counts.sent) * (CONFIG.stageSmoothing + 0.5 * Math.random());
+            sim.counts.saved += (savedTarget - sim.counts.saved) * (CONFIG.stageSmoothing + 0.3 * Math.random());
+            if (sim.counts.sent > sim.counts.captured) sim.counts.sent = sim.counts.captured;
+            if (sim.counts.saved > sim.counts.sent) sim.counts.saved = sim.counts.sent;
+
+            // instantaneous per-stage rates (answers/min), lightly smoothed
+            sim.inst = sim.inst * 0.4 + (((sim.counts.captured - prevCap) / dt) * 60) * 0.6;
+            sim.instSent = sim.instSent * 0.4 + (((sim.counts.sent - prevSent) / dt) * 60) * 0.6;
+            sim.instSaved = sim.instSaved * 0.4 + (((sim.counts.saved - prevSaved) / dt) * 60) * 0.6;
+            sim.speedHistory.push({ cap: sim.inst, sent: sim.instSent, saved: sim.instSaved });
+
+            // occasional teletype banners as batches flow
+            ttySentAcc += sim.counts.sent - lastSent;
+            ttySavedAcc += sim.counts.saved - lastSaved;
+            if (Math.floor(sim.counts.captured) > Math.floor(prevCap) && Math.random() < 0.5) {
+              logTeletype("captured " + Math.floor(sim.counts.captured), "cap");
+            }
+            if (ttySentAcc >= 25) {
+              ttySentAcc = 0;
+              logTeletype("sent batch → Kafka (" + Math.floor(sim.counts.sent) + " total)", "warn");
+            }
+            if (ttySavedAcc >= 20) {
+              ttySavedAcc = 0;
+              logTeletype("saved " + Math.floor(sim.counts.saved) + " → Mongo", "ok");
+            }
+            lastSent = sim.counts.sent;
+            lastSaved = sim.counts.saved;
+
+            setStatus("Collecting + publishing… " + Math.floor(sim.counts.sent) +
+              " sent / " + Math.floor(sim.counts.captured) + " captured");
+
+            // auto-finish when the new-answers target is reached
+            if (sim.counts.captured >= newTarget()) {
+              logTeletype("session done — collected " + Math.floor(sim.counts.captured) +
+                " new (" + sim.max + " total)", "ok");
+              stopRun(true);
+            }
+          } else {
+            // stopped / complete: FREEZE the tachograph — push nothing so the
+            // last session's trace stays on screen instead of scrolling away.
+            sim.inst = sim.instSent = sim.instSaved = 0;
+          }
+
+          if (sim.speedHistory.length > CONFIG.sparkSamples) {
+            sim.speedHistory = sim.speedHistory.slice(-CONFIG.sparkSamples);
+          }
+
+          renderAll();
+        }
+
+        function renderProgress() {
+          var target = newTarget();
+          var done = Math.min(target, Math.floor(sim.counts.captured));
+          var pct = Math.max(0, Math.min(100, (done / target) * 100));
+          progFill.style.width = pct + "%";
+          progPct.textContent = Math.round(pct) + "%";
+          progTally.textContent = done.toLocaleString() + " / " + target.toLocaleString() + " new";
+        }
+
+        function renderAll() {
+          renderClock();
+          renderGauge();
+          renderSpark();
+          renderQueues();
+          renderProgress();
+        }
+
+        /* ── Status pill / alarm ────────────────────────────────────────── */
+        // mode: "alert" (Page Check!) | "loginwall" | "idle" (ready) | "running"
+        function setPill(mode) {
+          runPill.classList.remove("is-idle", "is-running", "is-alert");
+          if (mode === "running") {
+            runPill.classList.add("is-running");
+            runState.textContent = "running";
+            runPill.title = "Session running — STOP is beside Now.";
+          } else if (mode === "idle") {
+            runPill.classList.add("is-idle");
+            runState.textContent = "ready";
+            runPill.title = "On /answers ✓ — press the green START to begin.";
+          } else if (mode === "loginwall") {
+            runPill.classList.add("is-alert");
+            runState.textContent = "Login Wall!";
+            runPill.title = "Quora blocked access (login wall). Log in on the tab, then press START to retry.";
+          } else {
+            runPill.classList.add("is-alert");
+            runState.textContent = "Page Check!";
+            runPill.title = PAGE_HINT;
+          }
+        }
+
+        /* ── Login wall: the alarm flags it and halts the run ───────────── */
+        var loginWall = false;
+        function raiseLoginWall() {
+          loginWall = true;
+          sim.running = false;
+          clockPanel.classList.remove("running");
+          setPill("loginwall");
+          logTeletype("LOGIN WALL — Quora blocked access. Log in on the tab, then START to retry.", "err");
+          setStatus("Login wall — log in and retry.");
+          renderAll();
+        }
+        // Debug hook so the login-wall alarm can be demoed on demand.
+        window.simLoginWall = raiseLoginWall;
+
+        /* ── Page check gate: START only "arms" once we're on /answers ──── */
+        function setPageOk(ok) {
+          sim.pageOk = ok;
+          if (!sim.running) setPill(ok ? "idle" : "alert");
+          renderClock();
+        }
+
+        /* ── Start / Stop control (START = clock legend, STOP = e-stop) ─── */
+        function startRun() {
+          if (!sim.pageOk) return;            // gated on the /answers page check
+          loginWall = false;                  // a retry clears the login-wall alarm
+          sim.running = true;
+          sim.startedAt = Date.now();
+          sim.counts = { captured: 0, sent: 0, saved: 0 };
+          sim.speedHistory = [];
+          sim.inst = sim.instSent = sim.instSaved = 0;
+          sim.gaugeMax = CONFIG.gaugeStartMax;
+          QUEUES.forEach(function (q) { sim.queueMax[q.key] = 1; });
+          lastSent = lastSaved = ttySentAcc = ttySavedAcc = 0;
+          sim.max = CONFIG.targetMax;
+
+          clockPanel.classList.add("running");   // reveals the e-stop beside Now
+          setPill("running");
+
+          logTeletype("serve online — session started (target " + sim.max +
+            (forceEl.checked ? ", force re-collect" : "") + ")", "ok");
+          renderAll();
+        }
+
+        function stopRun(completed) {
+          sim.running = false;
+          clockPanel.classList.remove("running");
+          setPill(sim.pageOk ? "idle" : "alert");
+          if (!completed) logTeletype("EMERGENCY STOP — session halted, counters reset on next START", "err");
+          setStatus(completed ? "Session complete." : "Stopped. Press START to run again.");
+          renderAll();
+        }
+
+        // The glowing green "START" clock legend is itself the start button.
+        function tryStartFromClock() { if (!sim.running && sim.pageOk) startRun(); }
+        clkStart.addEventListener("click", tryStartFromClock);
+        lblStart.addEventListener("click", tryStartFromClock);
+        // Fire-drill emergency stop beside "Now".
+        estopBtn.addEventListener("click", function (e) { e.stopPropagation(); if (sim.running) stopRun(false); });
+        // Collapsible console (hidden by default).
+        ttyHead.addEventListener("click", function () { ttyEl.classList.toggle("collapsed"); });
+        // Run-minimized toggle.
+        minToggle.addEventListener("change", function () {
+          logTeletype(minToggle.checked
+            ? "run-minimized ON — scraping continues in a background window"
+            : "run-minimized OFF", "info");
+        });
+
+        /* ── Boot: idle/ticking placeholder before Start ──────────────── */
+        function boot() {
+          buildQueues();
+          buildSparks();
+          sim.max = CONFIG.targetMax;
+          setPill("alert");                     // "Page Check!" until detected
+          logTeletype("checking qsbk serve…", "info");
+          logTeletype("looking for a Quora /answers tab…", "info");
+          renderAll();
+          setInterval(tick, CONFIG.tickMs);
+
+          // Simulated /answers page check — Start stays dark until this passes.
+          setTimeout(function () {
+            setPageOk(true);
+            setStatus("On /answers ✓ — ready to start.");
+            logTeletype("on /answers page ✓ — Start armed", "ok");
+          }, 1900);
+        }
+        boot();
+      })();
+    </script>
+  </body>
+</html>
