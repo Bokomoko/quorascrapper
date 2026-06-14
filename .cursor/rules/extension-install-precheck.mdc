@@ -1,0 +1,44 @@
+---
+description: Precheck before claiming the qsbk Chrome extension is testable/deployed (avoid the stale install-copy hurdle)
+globs: extension/**
+alwaysApply: false
+---
+
+# Extension testing precheck (qsbk Chrome extension)
+
+Chrome does NOT load the repo `extension/` directly. `qsbk install`
+(`shutil.copytree`) copies the **newest-by-manifest-version** source — among a
+bundled wheel copy and repo checkouts — into:
+
+```
+~/.local/share/qsbk/chrome-extension
+```
+
+Chrome loads that COPY. So editing `extension/` in the repo changes nothing the
+browser runs until you reinstall. We have hit this before: the user reloaded and
+still saw the old UI.
+
+## Before telling the user to reload/test extension changes
+
+1. **Bump `extension/manifest.json` `version`.** Required so `install` picks the
+   repo (not a same/higher-version bundled copy) and so the user can visually
+   confirm the reload (panel shows `chrome.runtime.getManifest().version`).
+2. **Add new assets to `web_accessible_resources`** if the injected panel
+   references them (e.g. `fonts/*`), or they 404 under the page CSP.
+3. **Reinstall:** `uv run qsbk install --serve-url <the user's current URL>`
+   (omitting `--serve-url` drops their `config.json` serve setting).
+4. **Verify the installed copy actually changed** — do not trust the repo edit:
+
+```bash
+grep -c '<a new-markup marker>' ~/.local/share/qsbk/chrome-extension/popup.html
+grep '"version"' ~/.local/share/qsbk/chrome-extension/manifest.json
+```
+
+5. Then tell the user: `chrome://extensions` → **Reload**; if still stale,
+   remove + re-add unpacked from `~/.local/share/qsbk/chrome-extension` (Chrome
+   caches the popup).
+
+## General principle
+
+Verify the artifact the user actually runs (installed copy / running container /
+loaded build), not just the source you edited, before claiming "ready to test."
