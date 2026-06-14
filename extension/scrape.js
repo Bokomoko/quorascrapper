@@ -590,31 +590,65 @@
     }
   }
 
-  // Owner's total answers from the embedded relay JSON. The page text may carry
-  // either single- (\") or unescaped (") relay payloads depending on how Quora
-  // serializes it, so the regex tolerates an optional backslash before quotes.
-  function extractOwnerAnswerCountFromGraphql() {
+  // All `numPublicAnswers` values in the embedded relay/GraphQL payload, with
+  // their character offset. The page text may carry either single- (\") or
+  // unescaped (") relay payloads depending on how Quora serializes it, so the
+  // regex tolerates an optional backslash before the quotes.
+  function numPublicAnswersMatches(html) {
+    var re = /numPublicAnswers\\?"?\s*:\s*(\d+)/g;
+    var out = [];
+    var m;
+    while ((m = re.exec(html)) !== null) {
+      out.push({ index: m.index, value: parseInt(m[1], 10) });
+    }
+    return out;
+  }
+
+  // Owner's TOTAL answer count, taken straight from Quora's GraphQL data — the
+  // relay store the profile page embeds (Quora exposes no standalone gql_para
+  // query that returns this count; it lives on the owner's User record). The
+  // owner is the only User in the store whose record carries the answers-tab
+  // connection (`recentPublicAndPinnedAnswersConnection`), so we anchor on that
+  // connection and pick the `numPublicAnswers` sitting closest to it. This
+  // pins the value to the page OWNER, never a suggested/related/viewer User
+  // record (those carry their own numPublicAnswers but no answers connection).
+  // `pageUid` (the /answers page owner uid from rootQueryVariables) is accepted
+  // for callers that want to assert ownership; the connection anchor already
+  // guarantees it.
+  function extractOwnerAnswerCountFromGraphql(pageUid) {
     var html = gqlPageHtml();
     if (!html) return null;
 
-    // Primary: the numPublicAnswers closest BEFORE the answers-tab connection
-    // belongs to the page owner.
+    var matches = numPublicAnswersMatches(html);
+    if (!matches.length) return null;
+
+    // Primary: the numPublicAnswers nearest the owner's answers-tab connection.
+    // Search a wide window on BOTH sides (serialization sometimes emits the
+    // count just after the connection id) and take the closest candidate.
     var connIdx = html.indexOf("recentPublicAndPinnedAnswersConnection");
     if (connIdx !== -1) {
-      var before = html.slice(Math.max(0, connIdx - 800), connIdx);
-      var all = before.match(/numPublicAnswers\\?"?\s*:\s*(\d+)/g);
-      if (all && all.length) {
-        var last = all[all.length - 1].match(/(\d+)/);
-        if (last) return parseInt(last[1], 10);
+      var best = null;
+      var bestDist = Infinity;
+      for (var i = 0; i < matches.length; i++) {
+        var dist = Math.abs(matches[i].index - connIdx);
+        if (dist < bestDist && dist <= 4000) {
+          bestDist = dist;
+          best = matches[i].value;
+        }
       }
+      if (best != null) return best;
     }
 
-    // Fallback: a numPublicAnswers record immediately followed by the owner's
-    // numProfileQuestions/numQuestions field (the owner User shape).
+    // Fallback: a numPublicAnswers immediately followed by the owner's
+    // numProfileQuestions/numQuestions field (the owner User record shape).
     var m = html.match(
       /numPublicAnswers\\?"?\s*:\s*(\d+)\s*,\s*\\?"?num(?:Profile)?Questions/
     );
     if (m) return parseInt(m[1], 10);
+
+    // Last resort within the relay data: if the page exposes exactly one
+    // numPublicAnswers, it can only be the owner's.
+    if (matches.length === 1) return matches[0].value;
 
     return null;
   }
@@ -624,7 +658,9 @@
   // changed still reports a number when the relay data is present.
   function extractOwnerInfo() {
     var profileUrl = ownerProfileUrlFromLocation();
-    var count = extractOwnerAnswerCountFromGraphql();
+    var ctx = extractPageContext();
+    // GraphQL/relay first (owner-anchored), DOM scrape only as last resort.
+    var count = extractOwnerAnswerCountFromGraphql(ctx.uid);
     var source = count != null ? "graphql" : null;
     if (count == null) {
       var stats = extractProfileStats();
@@ -640,7 +676,6 @@
     } catch (e) {
       /* keep raw slug */
     }
-    var ctx = extractPageContext();
     return {
       profile_url: profileUrl,
       profile_name: name || null,

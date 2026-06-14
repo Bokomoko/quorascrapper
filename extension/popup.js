@@ -303,9 +303,10 @@
   // Speedometer + three digital speedos. Uses the smoothed instantaneous
   // per-stage rate (lastSample) so the dial behaves like a real speedometer.
   function renderSpeed() {
-    var capRate = session.active ? lastSample.cap : 0;
-    var sentRate = session.active ? lastSample.sent : 0;
-    var savedRate = session.active ? lastSample.saved : 0;
+    var live = samplingActive();
+    var capRate = live ? lastSample.cap : 0;
+    var sentRate = live ? lastSample.sent : 0;
+    var savedRate = live ? lastSample.saved : 0;
 
     // Auto-range the dial up and down to the recent peak across all stages.
     var recentPeak = 1;
@@ -357,8 +358,10 @@
   }
 
   // One ~1Hz sample of per-stage instantaneous answers/min, lightly smoothed.
-  // Frozen (no new samples) when idle so the last run's tachograph trace stays
-  // on screen instead of scrolling away.
+  // Sampling continues through a short tail after the run ends (samplingActive)
+  // so the lagging Sent (final publish flush) and Saved (Mongo /known poll)
+  // deltas still register; once the tail expires sampling freezes (no new
+  // samples) so the last run's tachograph trace stays on screen.
   function sampleSpeed() {
     var now = Date.now();
     var dt = lastSampleAt ? (now - lastSampleAt) / 1000 : 0;
@@ -366,14 +369,15 @@
     var cap = session.found || 0;
     var sent = sessionNewCount() || 0;
     var saved = savedSessionDelta() || 0;
+    var live = samplingActive();
     var inst = { cap: 0, sent: 0, saved: 0 };
-    if (session.active && dt > 0) {
+    if (live && dt > 0) {
       inst.cap = (Math.max(0, cap - lastSampleCounts.cap) / dt) * 60;
       inst.sent = (Math.max(0, sent - lastSampleCounts.sent) / dt) * 60;
       inst.saved = (Math.max(0, saved - lastSampleCounts.saved) / dt) * 60;
     }
     lastSampleCounts = { cap: cap, sent: sent, saved: saved };
-    if (session.active) {
+    if (live) {
       lastSample = {
         cap: lastSample.cap * 0.4 + inst.cap * 0.6,
         sent: lastSample.sent * 0.4 + inst.sent * 0.6,
@@ -528,6 +532,9 @@
     lastSampleAt = Date.now();
     gaugeMax = 20;
     savedBaseline = profileState.saved || 0;
+    // New run: cancel any leftover post-run sampling tail from the prior run.
+    sampleTailUntil = 0;
+    lastTailSavedPollAt = 0;
   }
 
   var lastTtyMsg = "";
@@ -627,6 +634,27 @@
   var gaugeMax = 20;
   var savedBaseline = 0;
   var dashboardTimer = null;
+
+  // The collect/publish stages finish far apart from each other: GraphQL
+  // collection bursts in a second or two, the final publish flush lands at the
+  // end, and "saved" only appears once the subscriber drains Kafka→Mongo and the
+  // /known poll reflects it — all *after* session.active flips false. If we hard
+  // gate sampling on session.active, those lagging Sent/Saved increments are
+  // never sampled and the gauge/speedos freeze at 0. So we keep sampling for a
+  // short tail after a run ends; sampleTailUntil holds that deadline.
+  var SAMPLE_TAIL_MS = 15000;
+  var sampleTailUntil = 0;
+  // Throttle the extra "saved" poll we fire during the tail so the SAVED gauge
+  // climbs in real time instead of only on the 4 s health poll.
+  var TAIL_SAVED_POLL_MS = 2000;
+  var lastTailSavedPollAt = 0;
+
+  // True while we should keep feeding the gauge/tachograph: during a live run,
+  // or briefly afterwards so the lagging Sent (final flush) and Saved (Mongo
+  // poll) deltas still register before the trace freezes.
+  function samplingActive() {
+    return !!session.active || Date.now() < sampleTailUntil;
+  }
 
   // Status-pill gate state: pageOk = active tab is a Quora /answers page;
   // loginWall = Quora served a blocked/logged-out page.
@@ -943,6 +971,10 @@
 
   function endSession() {
     session.active = false;
+    // Keep the gauge/tachograph sampling for a short tail so the final Sent
+    // flush and the Mongo-lagged Saved count still animate before freezing.
+    sampleTailUntil = Date.now() + SAMPLE_TAIL_MS;
+    lastTailSavedPollAt = 0;
     if (session.intervalId) {
       clearInterval(session.intervalId);
       session.intervalId = null;
@@ -1363,6 +1395,19 @@
         updateScrapeGate(tab);
         if (!session.active) {
           var profileUrl = profileUrlFromAnswers(tab.url);
+          // Scope SAVED to this tab's owner SYNCHRONOUSLY, before the async
+          // owner-info fetch resolves. The live saved-count poll runs on its own
+          // timer and reads activeProfileUrl; if we only updated it inside the
+          // async fetchProfileTotal, a poll firing first would query the PREVIOUS
+          // owner (or, when null, the global "answers" collection → ~16,657) and
+          // paint that stale count on the new profile. Resetting saved/total here
+          // guarantees a clean slate the moment the active /answers tab changes.
+          if (profileUrl && profileUrl !== activeProfileUrl) {
+            profileState.saved = null;
+            profileState.total = null;
+            maxAutoFilled = false;
+            activeProfileUrl = profileUrl;
+          }
           if (
             !profileState.fetchPromise &&
             (profileUrl !== activeProfileUrl || profileState.total == null)
@@ -1436,7 +1481,12 @@
   async function refreshProfileSaved() {
     // Poll the Mongo-persisted count periodically — INCLUDING during an active
     // session — so "saved" ticks up live as the subscriber drains Kafka→Mongo.
-    if (!serveAvailable) {
+    // Without serve, or before the active tab's owner profile_url is resolved,
+    // SAVED must never show a leftover number: querying /known without a
+    // profile_url makes serve count the global ("answers") collection (~16,657
+    // from the initial backfill), which would wrongly read as this profile's
+    // saved total. Clear it instead (when idle) and skip the request.
+    if (!serveAvailable || !activeProfileUrl) {
       if (!session.active) profileState.saved = null;
       renderProfilePanel(false);
       return;
@@ -1638,6 +1688,20 @@
     renderDashboard();
     if (dashboardTimer) clearInterval(dashboardTimer);
     dashboardTimer = setInterval(function () {
+      // During the post-run tail, poll the Mongo-persisted "saved" count faster
+      // than the 4 s health poll so the SAVED gauge/tachograph tracks the
+      // subscriber draining Kafka→Mongo in (near) real time. Guarded so we never
+      // issue an un-scoped /known request (which would read the global count).
+      if (
+        !session.active &&
+        samplingActive() &&
+        serveAvailable &&
+        activeProfileUrl &&
+        Date.now() - lastTailSavedPollAt >= TAIL_SAVED_POLL_MS
+      ) {
+        lastTailSavedPollAt = Date.now();
+        refreshProfileSaved();
+      }
       sampleSpeed();
       renderDashboard();
     }, 1000);

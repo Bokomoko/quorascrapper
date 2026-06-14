@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "qsbk — Quora answer URL collector",
-  "version": "0.9.30",
+  "version": "0.10.1",
   "description": "Collect a logged-in Quora /answers page via GraphQL API (or scroll), export CSV/JSON or send to Kafka via qsbk serve.",
   "permissions": ["activeTab", "scripting", "storage", "tabs"],
   "host_permissions": [
@@ -36,7 +36,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["popup.html", "popup.js", "serve-config.js", "config.json"],
+      "resources": ["popup.html", "popup.js", "serve-config.js", "config.json", "fonts/*"],
       "matches": ["*://*.quora.com/*", "*://quora.com/*"]
     }
   ]
